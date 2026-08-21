@@ -3002,13 +3002,14 @@ function importExcel(){
         rows.forEach(function(x) {
             if(!x.ID) return;
             var rec = { id: String(x.ID), name: x.Name || '', grade: x.Grade || '', section: x.Section || '', category: (x.Category || 'STUDENT').toUpperCase() };
-            var exArray = people.filter(function(p) { return p.id === rec.id; });
+            var exArray = people.filter(function(p) { return String(p.id).trim().toLowerCase() === String(rec.id).trim().toLowerCase(); });
             if(exArray.length > 0){
                 var ex = exArray[0];
                 ex.name = rec.name; ex.grade = rec.grade; ex.section = rec.section; ex.category = rec.category; updated++;
             } else { people.push(rec); added++; }
         });
         saveAll(); renderPeople();
+        if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ window.QLogCentral.syncDatasets(['people']); }
         document.getElementById('importResult').innerHTML = "Added: " + added + " Updated: " + updated + " Total: " + people.length;
     };
     r.readAsArrayBuffer(f);
@@ -5143,7 +5144,7 @@ function addBook(){
     var newCopies = document.getElementById('newCopies');
     var isbn = newISBN.value.trim(); var id = isbn;
     if(!id || !isbn){ alert('Book ID and ISBN are required'); return; }
-    var exArray = books.filter(function(b){ return String(b.isbn).trim() === isbn; });
+    var exArray = books.filter(function(b){ return (id && String(b.id).trim().toLowerCase() === id.toLowerCase()) || (isbn && String(b.isbn).trim() === isbn); });
     if(exArray.length > 0){ alert('ISBN already exists.'); return; }
     
     books.push({ id: id, isbn: isbn, title: newTitle.value.trim(), author: newAuthor.value.trim(), category: newCategory.value.trim(), copies: Number(newCopies.value) || 0 });
@@ -5192,12 +5193,13 @@ function importBooks(){
         rows.forEach(function(x){
             var id = String(x["Book ID"] || "").trim(); if(!id) return;
             var cp = Number(x.Copies) || 0; var isbn = String(x.ISBN || '').trim();
-            var exArray = books.filter(function(b){ return String(b.isbn).trim() === isbn; });
+            var exArray = books.filter(function(b){ return (id && String(b.id).trim().toLowerCase() === id.toLowerCase()) || (isbn && String(b.isbn).trim() === isbn); });
             if(exArray.length > 0){
-                var ex = exArray[0]; ex.id = id || ex.id; ex.isbn = isbn; ex.title = x.Title; ex.author = x.Author; ex.category = x.Category; ex.copies = (Number(ex.copies) || 0) + cp; updated++;
+                var ex = exArray[0]; ex.id = id || ex.id; ex.isbn = isbn; ex.title = x.Title; ex.author = x.Author; ex.category = x.Category; ex.copies = cp; updated++;
             } else { books.push({id: id, isbn: isbn, title: x.Title, author: x.Author, category: x.Category, copies: cp}); added++; }
         });
         localStorage.setItem('books', JSON.stringify(books));
+        if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ window.QLogCentral.syncDatasets(['books']); }
         logAudit("BULK_IMPORT_BOOKS", "Uploaded: " + added + " New Books, Updated: " + updated);
         document.getElementById('bookImportResult').innerHTML = "Uploaded: " + added + " New Books, " + updated + " Updated Only";
         renderBookInventory();
@@ -6022,6 +6024,7 @@ function importEquipmentExcel(){
         }
         saveEquipData();
         refreshEquipmentUI();
+        if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ window.QLogCentral.syncDatasets(['equipment','equipLogs']); }
         eqAudit('EQUIPMENT_BULK_IMPORT', 'Added: ' + added + ', Updated: ' + updated + ', Skipped: ' + skipped + ', Invalid: ' + invalid + ' (file: ' + f.name + ')');
         if(resEl){
             resEl.style.color = (invalid || skipped) ? '#b45309' : '#16a34a';
