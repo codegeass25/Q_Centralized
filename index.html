@@ -1568,7 +1568,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
 <button style="background:#0f172a;" onclick="printReport()">🖨 Print Report</button>
 <button onclick="exportLogs()">📥 Export All Logs (.xlsx)</button>
 <span style="flex-grow:1"></span>
-<button onclick="resetDatabase()">🗑 Reset Database</button>
+<button onclick="resetDatabase()">🛡 Reset This Device</button><button onclick="rebuildOfficeData()">↻ Rebuild My Office Data</button>
 </div>
 </div>
 <div class="full-table">
@@ -5035,14 +5035,28 @@ function renderReports(){
 }
 
 function resetDatabase(){
-    if(!confirm('Delete ALL records in every tab? This cannot be undone.')) return;
-    var keys = ['people','logs','books','borrowLogs', 'configData', 'dynamicFilterData', 'borrowPolicies', 'reservations', 'auditLogs', 'savedSession'];
-    for(var i=0; i<keys.length; i++) { localStorage.removeItem(keys[i]); }
-    people = []; logs = []; books = []; borrowLogs = []; reservations = []; auditLogs = [];
-    renderPeople(); renderLogs();
-    if(typeof renderBorrow === 'function') renderBorrow();
-    toast('All data completely deleted.','green');
-    setTimeout(function() { window.location.reload(); }, 1500);
+    if(window.QLogCentral && typeof window.QLogCentral.resetDevice === 'function'){
+        window.QLogCentral.resetDevice();
+        return;
+    }
+    if(!confirm('Reset this device only? Central records will NOT be deleted.')) return;
+    ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'].forEach(function(k){localStorage.removeItem(k);});
+    people=[];logs=[];books=[];borrowLogs=[];reservations=[];auditLogs=[];if(typeof equipment!=='undefined')equipment=[];if(typeof equipLogs!=='undefined')equipLogs=[];
+    renderPeople();renderLogs();if(typeof renderBorrow==='function')renderBorrow();
+    toast('This device data was reset.','green');
+    setTimeout(function(){window.location.reload();},700);
+}
+
+function rebuildOfficeData(){
+    if(window.QLogCentral && typeof window.QLogCentral.rebuildMyOffice === 'function'){
+        window.QLogCentral.rebuildMyOffice().then(function(){
+            toast('✅ Office data rebuilt from Central.','green');
+        }).catch(function(){
+            toast('❌ Office rebuild failed.','red');
+        });
+        return;
+    }
+    toast('Central sync is not ready yet.','yellow');
 }
 
 function printReport(){
