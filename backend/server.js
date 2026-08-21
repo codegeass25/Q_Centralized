@@ -229,7 +229,9 @@ async function initDb() {
       profile_key TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL,
-      data_version INTEGER NOT NULL DEFAULT 0
+      data_version INTEGER NOT NULL DEFAULT 0,
+      sync_ready INTEGER NOT NULL DEFAULT 0,
+      auth_generation INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS records(
@@ -352,6 +354,8 @@ async function initDb() {
 
   for (const stmt of [
     "ALTER TABLE devices ADD COLUMN data_version INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE devices ADD COLUMN sync_ready INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE devices ADD COLUMN auth_generation INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE records ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE records ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE records ADD COLUMN deleted_at TEXT DEFAULT NULL",
@@ -421,31 +425,84 @@ async function initDb() {
   await rebuildGlobalRegistry();
 }
 
-async function rebuildGlobalRegistry() {
+async function rebuildGlobalRegistry(){
   await run('DELETE FROM central_registry');
-  const rows = await all(
-    `SELECT profile_key,dataset,record_key,record_json,updated_at,revision,deleted_at,facility,in_charge
-     FROM profile_records
-     WHERE deleted_at IS NULL AND dataset IN ('people','books','equipment')
-     ORDER BY updated_at DESC, revision DESC`
-  );
+
+  const rows = await all(`
+    SELECT
+      profile_key,
+      dataset,
+      record_key,
+      record_json,
+      fingerprint,
+      updated_at,
+      revision,
+      deleted_at,
+      facility,
+      in_charge
+    FROM profile_records
+    WHERE deleted_at IS NULL
+      AND dataset IN ('people','books','equipment')
+    ORDER BY updated_at DESC, revision DESC
+  `);
+
+  const counts = await all(`
+    SELECT
+      dataset,
+      fingerprint AS identity_key,
+      COUNT(*) AS occurrences
+    FROM profile_records
+    WHERE deleted_at IS NULL
+      AND dataset IN ('people','books','equipment')
+      AND fingerprint <> ''
+    GROUP BY dataset, fingerprint
+  `);
+
+  const occMap = new Map();
+  for (const row of counts) {
+    occMap.set(
+      row.dataset + '|' + row.identity_key,
+      Number(row.occurrences || 0)
+    );
+  }
+
   const seen = new Set();
+
   for (const row of rows) {
     const obj = safeJson(row.record_json, {});
-    const identity = recordFingerprint(row.dataset, obj);
-    const key = `${row.dataset}|${identity}`;
-    if (!identity || seen.has(key)) continue;
+    const identity = row.fingerprint || recordFingerprint(row.dataset, obj);
+    if (!identity) continue;
+
+    const key = row.dataset + '|' + identity;
+    if (seen.has(key)) continue;
     seen.add(key);
-    const ch = contentHash(obj);
-    const occ = await get(
-      `SELECT COUNT(*) n FROM profile_records WHERE dataset=? AND fingerprint=? AND deleted_at IS NULL`,
-      [row.dataset, identity]
-    );
-    await run(
-      `INSERT INTO central_registry(dataset,identity_key,record_json,content_hash,updated_at,revision,occurrences,last_profile_key,last_facility,last_in_charge)
-       VALUES(?,?,?,?,?,?,?,?,?,?)`,
-      [row.dataset,identity,row.record_json,ch,row.updated_at,row.revision||1,occ.n,row.profile_key,row.facility||'',row.in_charge||'']
-    );
+
+    await run(`
+      INSERT INTO central_registry(
+        dataset,
+        identity_key,
+        record_json,
+        content_hash,
+        updated_at,
+        revision,
+        occurrences,
+        last_profile_key,
+        last_facility,
+        last_in_charge
+      )
+      VALUES(?,?,?,?,?,?,?,?,?,?)
+    `,[
+      row.dataset,
+      identity,
+      row.record_json,
+      contentHash(obj),
+      row.updated_at,
+      row.revision || 1,
+      occMap.get(key) || 0,
+      row.profile_key,
+      row.facility || '',
+      row.in_charge || ''
+    ]);
   }
 }
 
@@ -494,6 +551,8 @@ async function requireDevice(req,res,next) {
     if (!token) return res.status(401).json({ok:false,error:'DEVICE_AUTH_REQUIRED'});
     const row = await get(
       `SELECT d.source_id,d.facility,d.in_charge,d.designation,d.role,d.profile_key,d.data_version,
+              d.sync_ready,
+              d.auth_generation,
               COALESCE(p.status,'ACTIVE') profile_status,p.assignment_id
        FROM devices d LEFT JOIN profile_assignments p ON p.profile_key=d.profile_key
        WHERE d.token_hash=?`,
@@ -603,14 +662,14 @@ app.post('/api/auth/device', async (req,res,next) => {
     } else {
       await run(`UPDATE profile_assignments SET designation=?,role=?,updated_at=? WHERE profile_key=?`,[dg,rl,ts,pk]);
     }
+    const centralResetGeneration=await getCentralResetGeneration();
     const existing=await get('SELECT id FROM devices WHERE source_id=?',[String(sourceId)]);
     if (existing) {
-      await run(`UPDATE devices SET token_hash=?,facility=?,in_charge=?,designation=?,role=?,profile_key=?,last_seen_at=? WHERE source_id=?`,[tokenHash(token),f,ic,dg,rl,pk,ts,String(sourceId)]);
+      await run(`UPDATE devices SET token_hash=?,facility=?,in_charge=?,designation=?,role=?,profile_key=?,last_seen_at=?,sync_ready=0,auth_generation=? WHERE source_id=?`,[tokenHash(token),f,ic,dg,rl,pk,ts,centralResetGeneration,String(sourceId)]);
     } else {
-      await run(`INSERT INTO devices(source_id,token_hash,facility,in_charge,designation,role,profile_key,created_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?)`,[String(sourceId),tokenHash(token),f,ic,dg,rl,pk,ts,ts]);
+      await run(`INSERT INTO devices(source_id,token_hash,facility,in_charge,designation,role,profile_key,created_at,last_seen_at,sync_ready,auth_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,[String(sourceId),tokenHash(token),f,ic,dg,rl,pk,ts,ts,0,centralResetGeneration]);
     }
-    const centralResetGeneration=await getCentralResetGeneration();
-    res.json({ok:true,token,sourceId:String(sourceId),profileKey:pk,assignmentId:`ASSIGN-${pk}`,centralResetGeneration,profile:{facility:f,inCharge:ic,designation:dg,role:rl,status:'ACTIVE'}});
+    res.json({ok:true,token,sourceId:String(sourceId),profileKey:pk,assignmentId:`ASSIGN-${pk}`,centralResetGeneration,syncReady:false,profile:{facility:f,inCharge:ic,designation:dg,role:rl,status:'ACTIVE'}});
   } catch(e) { next(e); }
 });
 
@@ -630,6 +689,41 @@ function buildDatasetsFromRows(rows) {
 async function emitUpdated(event) {
   io.emit('qlog:updated', event);
 }
+
+app.post('/api/device/activate-sync', requireDevice, async(req,res,next)=>{
+  try {
+    const currentGeneration = await getCentralResetGeneration();
+    const deviceGeneration = Number(req.device.auth_generation || 0);
+    const requestedGeneration = Number((req.body || {}).centralResetGeneration || 0);
+    const mode = String((req.body || {}).mode || 'existing').toLowerCase();
+
+    if (deviceGeneration !== currentGeneration || requestedGeneration !== currentGeneration) {
+      return res.status(409).json({
+        ok:false,
+        error:'CENTRAL_RESET_REQUIRED',
+        centralResetGeneration:currentGeneration
+      });
+    }
+
+    if (mode !== 'empty' && mode !== 'existing') {
+      return res.status(400).json({ok:false,error:'INVALID_SYNC_ACTIVATION_MODE'});
+    }
+
+    await run(
+      'UPDATE devices SET sync_ready=1,auth_generation=? WHERE source_id=?',
+      [currentGeneration,req.device.source_id]
+    );
+
+    res.json({
+      ok:true,
+      syncReady:true,
+      mode,
+      centralResetGeneration:currentGeneration
+    });
+  } catch(e) {
+    next(e);
+  }
+});
 
 app.get('/api/state', requireDevice, async (req,res,next)=>{
   try {
@@ -694,6 +788,14 @@ async function canonicalKeyFor(profile,dataset,incomingKey,fp){
 
 app.post('/api/sync', requireDevice, async(req,res,next)=>{
   try {
+    const currentGeneration = await getCentralResetGeneration();
+    if (Number(req.device.auth_generation || 0) !== currentGeneration || Number(req.device.sync_ready || 0) !== 1) {
+      return res.status(409).json({
+        ok:false,
+        error:'SYNC_NOT_ACTIVATED',
+        centralResetGeneration:currentGeneration
+      });
+    }
     const incoming=(req.body&&req.body.datasets)||{};
     const deletions=(req.body&&req.body.deletions)||{};
     const changed=new Set();
@@ -784,6 +886,10 @@ app.post('/api/sync', requireDevice, async(req,res,next)=>{
       await run('COMMIT');
     }catch(e){try{await run('ROLLBACK');}catch(_){}throw e;}
 
+    if (Array.from(changed).some(ds => GLOBAL_DATASETS.has(ds))) {
+      await rebuildGlobalRegistry();
+    }
+
     const event={
       sourceId:req.device.source_id,
       profileKey:req.device.profile_key,
@@ -828,6 +934,7 @@ app.get('/api/admin/summary', requireAdmin, async(req,res,next)=>{
 
 app.get('/api/admin/global', requireAdmin, async(req,res,next)=>{
   try{
+    await rebuildGlobalRegistry();
     const dataset=String(req.query.dataset||'people');
     if(!GLOBAL_DATASETS.has(dataset)) return res.status(400).json({ok:false,error:'INVALID_GLOBAL_DATASET'});
     const limit=Math.min(Math.max(Number(req.query.limit||5000),1),20000);
@@ -957,7 +1064,7 @@ app.get('/api/admin/diagnostics', requireAdmin, async(req,res,next)=>{try{
 }catch(e){next(e);}});
 
 app.use('/central-assets',express.static(path.join(__dirname,'central-assets')));
-app.get('/central.html',(req,res)=>res.sendFile(path.join(__dirname,'central.html')));
+app.get('/central.html',(req,res)=>{res.set('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate'); res.set('Pragma','no-cache'); res.set('Expires','0'); res.sendFile(path.join(__dirname,'central.html'));});
 app.get('/',(req,res)=>res.redirect('/central.html'));
 app.use((err,req,res,next)=>{
   console.error('[QLog] API error:',err);
