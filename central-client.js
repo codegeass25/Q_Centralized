@@ -15,6 +15,7 @@
   var RECONCILE_PREFIX = 'qlogCentralReconcileAt::';
   var CACHE_PREFIX = 'qlogProfileCache::';
   var RESET_KEY = 'qlogCentralResetRequested';
+  var RESET_HOLD_KEY = 'qlogCentralResetHold::';
   var DELETE_QUEUE_PREFIX = 'qlogCentralDeleteQueue::';
 
   var SYNC_KEYS = ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','configData','dynamicFilterData','borrowPolicies'];
@@ -253,15 +254,24 @@
         localStorage.removeItem(name);
         if(state.activeProfileKey) localStorage.removeItem(cacheKey(currentScope(),name));
       });
-      var prefix1=RECONCILE_PREFIX+hashScope(currentScope());
-      localStorage.removeItem(prefix1);
+      localStorage.removeItem(RECONCILE_PREFIX+hashScope(currentScope()));
       state.pending.clear();
       window.people=[]; window.logs=[]; window.books=[]; window.borrowLogs=[]; window.reservations=[]; window.auditLogs=[]; window.equipment=[]; window.equipLogs=[];
       ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'].forEach(function(name){try{localStorage.setItem(name,'[]');}catch(e){}});
       clearDeleteQueue(currentScope());
-      localStorage.setItem(RESET_KEY,new Date().toISOString());
+      /* Reset is LOCAL ONLY. It intentionally does not rebuild and does not send tombstones. */
+      localStorage.setItem(RESET_HOLD_KEY+hashScope(currentScope()),new Date().toISOString());
+      localStorage.removeItem(RESET_KEY);
     }finally{state.suppress=false;}
     refreshUi();
+  }
+
+  function localResetHeld(scope){
+    return !!localStorage.getItem(RESET_HOLD_KEY+hashScope(scope));
+  }
+
+  function clearLocalResetHold(scope){
+    localStorage.removeItem(RESET_HOLD_KEY+hashScope(scope));
   }
 
   async function requestProfileRebuild(){
@@ -277,12 +287,16 @@
   }
 
   async function rebuildMyOffice(){
-    if(!state.token||!navigator.onLine||!currentFacility()||!currentInCharge()){openAuth();throw new Error('PROFILE_AUTH_REQUIRED');}
+    if(!state.token||!navigator.onLine||!currentFacility()||!currentInCharge()){
+      openAuth();
+      throw new Error('PROFILE_AUTH_REQUIRED');
+    }
     try{
       setStatus('Rebuilding '+scopeLabel()+' from Central…','warn');
       var resp=await requestProfileRebuild();
       if(resp.profileKey&&state.activeProfileKey&&resp.profileKey!==state.activeProfileKey)throw Object.assign(new Error('PROFILE_SCOPE_MISMATCH'),{status:409});
       applyFullState(resp);
+      clearLocalResetHold(currentScope());
       localStorage.removeItem(RESET_KEY);
       saveProfileCache(currentScope());
       setStatus('Office data rebuilt from Central','ok');
@@ -301,28 +315,23 @@
 
   async function resetThisDevice(){
     var label=scopeLabel();
-    if(!state.token||state.activeProfileKey!==scopeId()){openAuth();return;}
-    if(!navigator.onLine){alert('Please connect to Central before resetting this device. Central data is safe and this reset will not run offline.');return;}
-    if(!confirm('Reset this device only for '+label+'?\n\nCentral records will NOT be deleted. The device will first download the authoritative Central copy, then replace only its local data.')) return;
+    if(!state.token||state.activeProfileKey!==scopeId()){
+      openAuth();
+      return;
+    }
+    if(!confirm('Reset THIS DEVICE only for '+label+'?\n\nThis clears the data shown in all office tabs on this device.\n\nCENTRAL RECORDS WILL NOT BE DELETED.\n\nNo automatic rebuild will happen. Use "Rebuild My Office Data" when you are ready to restore the office copy.')) return;
     try{
-      setStatus('Checking Central snapshot for '+label+'…','warn');
-      var resp=await requestProfileRebuild();
-      if(resp.profileKey&&state.activeProfileKey&&resp.profileKey!==state.activeProfileKey)throw Object.assign(new Error('PROFILE_SCOPE_MISMATCH'),{status:409});
-      /* Central snapshot is verified BEFORE local data is touched. */
       clearLocalProfileData();
-      applyFullState(resp);
-      localStorage.removeItem(RESET_KEY);
-      saveProfileCache(currentScope());
-      setStatus('This device was reset and rebuilt from Central','ok');
-      return resp;
+      setStatus('This device was reset. Central records are untouched. Click Rebuild My Office Data to restore.','ok');
+      alert('This device has been reset.\n\nCentral records were NOT deleted.\n\nNo automatic rebuild was performed.\nUse "Rebuild My Office Data" when you are ready to restore the office data.');
     }catch(e){
-      setStatus('Reset cancelled — '+(e.data&&e.data.error||e.message||'Central unavailable'),'err');
-      alert('Reset was NOT completed. Central data is safe.\n\nReason: '+(e.data&&e.data.error||e.message||'Central unavailable'));
+      setStatus('Device reset failed — '+(e.message||'Unknown error'),'err');
       throw e;
     }
   }
 
   async function fullProfileReconcile(){
+    if(localResetHeld(currentScope())) return;
     if(!state.token||!navigator.onLine||!currentFacility()||!currentInCharge())return;
     try{
       var resp=await api('/api/state');
@@ -336,6 +345,7 @@
     }
   }
   async function reconcile(){
+    if(localResetHeld(currentScope())) return;
     if(state.reconciling||!state.token||!navigator.onLine||!currentFacility()||!currentInCharge())return;
     state.reconciling=true;
     try{
@@ -359,8 +369,12 @@
       state.token=j.token; state.activeFacility=facility; state.activeProfileKey=j.profileKey||scopeId();
       localStorage.setItem(TOKEN_KEY,state.token); localStorage.setItem(ACTIVE_FACILITY_KEY,facility); localStorage.setItem(ACTIVE_PROFILE_KEY,state.activeProfileKey); localStorage.setItem(ACCESS_HINT_KEY,new Date().toISOString());
       var resetRequested=!!localStorage.getItem(RESET_KEY);
+      var held=localResetHeld(currentScope());
       var cached=hasProfileCache(currentScope());
-      if(resetRequested || !cached){
+      if(held){
+        PROFILE_DATASETS.forEach(function(name){setDatasetLocal(name,[],false);});
+        setStatus('Connected to Central. Local device is reset; use Rebuild My Office Data to restore.','warn');
+      }else if(resetRequested || !cached){
         await fullProfileReconcile();
         saveProfileCache(currentScope());
         localStorage.removeItem(RESET_KEY);
@@ -370,7 +384,7 @@
         await fullProfileReconcile();
       }
       closeAuth(); connectSocket();
-      setStatus('Central '+scopeLabel()+' connected','ok');
+      if(!held) setStatus('Central '+scopeLabel()+' connected','ok');
     }catch(e){
       var er=document.getElementById('qlogCentralAuthError'); if(er)er.textContent='Connection failed: '+e.message;
       setStatus('Central not connected','err');
@@ -467,6 +481,26 @@
             if(evt.profileKey && state.activeProfileKey && evt.profileKey!==state.activeProfileKey)return;
             reconcile();
           });
+          state.socket.on('qlog:central_reset',function(){
+            /* Central Admin wiped the master database: remove local profile caches too. */
+            try{
+              state.suppress=true;
+              PROFILE_DATASETS.forEach(function(name){
+                localStorage.removeItem(name);
+                localStorage.removeItem(cacheKey(currentScope(),name));
+              });
+              localStorage.removeItem(reconcileKey(currentScope()));
+              clearDeleteQueue(currentScope());
+              localStorage.removeItem(TOKEN_KEY);
+              localStorage.removeItem(ACTIVE_PROFILE_KEY);
+              localStorage.removeItem(RESET_KEY);
+              localStorage.removeItem(RESET_HOLD_KEY+hashScope(currentScope()));
+              window.people=[];window.logs=[];window.books=[];window.borrowLogs=[];window.reservations=[];window.auditLogs=[];window.equipment=[];window.equipLogs=[];
+            }finally{state.suppress=false;}
+            setStatus('Central database was reset. Sign in again and use Rebuild when instructed.','warn');
+            refreshUi();
+            openAuth();
+          });
           state.socket.on('connect_error',function(){/* polling fallback */});
         }catch(e){}
       };
@@ -488,13 +522,18 @@
       state.token=''; state.activeProfileKey=''; localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(ACTIVE_PROFILE_KEY);
     }
     var resetRequested=!!localStorage.getItem(RESET_KEY);
+    var held=localResetHeld(scope);
     var cached=hasProfileCache(scope);
-    if(cached && !resetRequested) loadProfileCache(scope);
+    if(held){
+      PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});
+    }else if(cached && !resetRequested) loadProfileCache(scope);
     else {PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});}
-    if(!navigator.onLine){setStatus('Offline — '+scopeLabel()+' local data retained','warn');return;}
+    if(!navigator.onLine){setStatus(held?'Offline — device reset is held; use Rebuild when online':'Offline — '+scopeLabel()+' local data retained','warn');return;}
     if(state.token && state.activeProfileKey===scopeId()){
       setStatus('Central '+scopeLabel()+' connection ready','warn');
-      if(resetRequested || !cached){ await fullProfileReconcile(); saveProfileCache(scope); localStorage.removeItem(RESET_KEY); }
+      if(held){
+        setStatus('Connected to Central. Local device is reset; click Rebuild My Office Data to restore.','warn');
+      }else if(resetRequested || !cached){ await fullProfileReconcile(); saveProfileCache(scope); localStorage.removeItem(RESET_KEY); }
       else { await sync(true); await fullProfileReconcile(); }
       connectSocket();
     }else{
@@ -508,6 +547,7 @@
     connect:function(){var i=document.getElementById('qlogCentralCode');if(i)connectWithCode(i.value.trim());},
     closeAuth:closeAuth,
     sync:function(){schedule(SYNC_KEYS);sync(true);},
+    syncDatasets:function(names){schedule(names||SYNC_KEYS);sync(false);},
     resetDevice:resetThisDevice,
     rebuildMyOffice:rebuildMyOffice,
     getDeleteQueue:function(){return readDeleteQueue(currentScope());},
