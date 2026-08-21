@@ -64,11 +64,6 @@
 
   <section id="overview" class="panel active">
     <div class="card"><h3 style="margin-top:0">Recent Sync Activity</h3><div id="recent"></div></div>
-    <div class="dangerBox">
-      <h4>⚠ Central Database Reset</h4>
-      <div class="small" style="margin-bottom:10px">Deletes all Central records, profiles, devices/tokens, synchronization aliases, cursors, event history, and the Central dedup registry. This does not touch files stored on GitHub, but it will require each office to authenticate again.</div>
-      <button class="resetBtn" onclick="resetEntireDatabase()">Delete ALL Central Data</button>
-    </div>
   </section>
 
   <section id="people" class="panel">
@@ -135,7 +130,7 @@ async function loadProfiles(){const d=await jfetch('/api/admin/profiles');docume
 async function archiveProfile(pk){if(!confirm('Archive this In-Charge assignment? Historical Central records will remain.'))return;try{await jfetch('/api/admin/profiles/archive',{method:'POST',body:JSON.stringify({profileKey:pk})});await loadProfiles();await refreshAll();}catch(e){alert(e.message);}}
 async function restoreProfile(pk){if(!confirm('Restore this archived assignment?'))return;try{await jfetch('/api/admin/profiles/restore',{method:'POST',body:JSON.stringify({profileKey:pk})});await loadProfiles();await refreshAll();}catch(e){alert(e.message);}}
 async function transferProfile(pk){const ic=prompt('New In-Charge name:');if(!ic)return;const facility=prompt('Office / Laboratory / Guardhouse / Library:');if(!facility)return;const designation=prompt('Designation:','In-Charge')||'In-Charge';const role=prompt('Role:','incharge')||'incharge';if(!confirm('Transfer this office assignment to '+ic+' at '+facility+'?\n\nOld records remain historical.'))return;try{await jfetch('/api/admin/profiles/transfer',{method:'POST',body:JSON.stringify({fromProfileKey:pk,inCharge:ic,facility:facility,designation:designation,role:role})});await loadProfiles();await refreshAll();}catch(e){alert(e.message);}}
-async function resetEntireDatabase(){const phrase='RESET ALL CENTRAL DATA';const typed=prompt('This permanently deletes ALL Central records, all profiles/devices, synchronization cache, aliases, cursors and the school-wide dedup registry. Office local data is NOT modified.\n\nType exactly: '+phrase);if(typed!==phrase)return;const second=confirm('FINAL WARNING: delete the entire Central database now?');if(!second)return;try{const d=await jfetch('/api/admin/reset-database',{method:'POST',body:JSON.stringify({confirmation:phrase})});alert(d.message||'Central database reset complete.');location.reload();}catch(e){alert('Central reset failed: '+e.message);}}
+async function resetEntireDatabase(){const phrase='RESET ALL CENTRAL DATA';const typed=prompt('This PERMANENTLY deletes ALL Central records, profiles, devices/tokens, synchronization caches, aliases, cursors, event history and the school-wide dedup registry. Every office device will also be invalidated so old local caches cannot repopulate Central.\n\nType exactly: '+phrase);if(typed!==phrase)return;const second=confirm('FINAL WARNING: delete the entire Central database now?');if(!second)return;try{const d=await jfetch('/api/admin/reset-database',{method:'POST',body:JSON.stringify({confirmation:phrase})});alert(d.message||'Central database reset complete.');location.reload();}catch(e){alert('Central reset failed: '+e.message);}}
 async function exportVisitors(){try{const r=await fetch('/api/admin/visitors/export.html',{headers:{'Authorization':'Bearer '+adminToken}});if(!r.ok)throw new Error('Export request failed');const blob=await r.blob();const u=URL.createObjectURL(blob);const a=document.createElement('a');a.href=u;a.download='QLog_Central_Visitor_Logs.html';document.body.appendChild(a);a.click();a.remove();URL.revokeObjectURL(u);}catch(e){alert(e.message);}}
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 document.getElementById('adminPassword').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
