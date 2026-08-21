@@ -64,6 +64,19 @@ function exec(sql) {
   });
 }
 function nowIso() { return new Date().toISOString(); }
+async function getCentralResetGeneration(){
+  const row=await get('SELECT meta_value FROM system_meta WHERE meta_key=?',['central_reset_generation']);
+  const n=Number(row && row.meta_value);
+  return Number.isFinite(n) && n>=0 ? n : 0;
+}
+async function bumpCentralResetGeneration(){
+  const next=(await getCentralResetGeneration())+1;
+  await run(
+    `INSERT INTO system_meta(meta_key,meta_value) VALUES(?,?) ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value`,
+    ['central_reset_generation',String(next)]
+  );
+  return next;
+}
 function randomToken(bytes = 32) { return crypto.randomBytes(bytes).toString('hex'); }
 function tokenHash(token) { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
 function safeJson(value, fallback) { try { return JSON.parse(value); } catch { return fallback; } }
@@ -323,6 +336,11 @@ async function initDb() {
       PRIMARY KEY(dataset,identity_key)
     );
 
+    CREATE TABLE IF NOT EXISTS system_meta(
+      meta_key TEXT PRIMARY KEY,
+      meta_value TEXT NOT NULL DEFAULT ''
+    );
+
     CREATE INDEX IF NOT EXISTS idx_records_dataset_date ON records(dataset,record_date);
     CREATE INDEX IF NOT EXISTS idx_records_dataset_fingerprint ON records(dataset,fingerprint);
     CREATE INDEX IF NOT EXISTS idx_records_source_updated ON records(source_id,updated_at);
@@ -564,7 +582,8 @@ app.get('/api/health', async (req,res) => {
     const globalPeople = await get("SELECT COUNT(*) n FROM central_registry WHERE dataset='people'");
     const globalBooks = await get("SELECT COUNT(*) n FROM central_registry WHERE dataset='books'");
     const globalEquipment = await get("SELECT COUNT(*) n FROM central_registry WHERE dataset='equipment'");
-    res.json({ok:true,service:'QLog Pro Ultimate Central',db:'sqlite3',syncModel:'profile+global-dedup+revision+tombstone',time:nowIso(),devices:devices.n,activeProfiles:profiles.n,registeredPeople:globalPeople.n,books:globalBooks.n,equipment:globalEquipment.n,publicApiUrl:PUBLIC_API_URL});
+    const centralResetGeneration=await getCentralResetGeneration();
+    res.json({ok:true,service:'QLog Pro Ultimate Central',db:'sqlite3',syncModel:'profile+global-dedup+revision+tombstone',time:nowIso(),devices:devices.n,activeProfiles:profiles.n,registeredPeople:globalPeople.n,books:globalBooks.n,equipment:globalEquipment.n,centralResetGeneration,publicApiUrl:PUBLIC_API_URL});
   } catch(e) { res.status(500).json({ok:false,error:e.message}); }
 });
 
@@ -590,7 +609,8 @@ app.post('/api/auth/device', async (req,res,next) => {
     } else {
       await run(`INSERT INTO devices(source_id,token_hash,facility,in_charge,designation,role,profile_key,created_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?)`,[String(sourceId),tokenHash(token),f,ic,dg,rl,pk,ts,ts]);
     }
-    res.json({ok:true,token,sourceId:String(sourceId),profileKey:pk,assignmentId:`ASSIGN-${pk}`,profile:{facility:f,inCharge:ic,designation:dg,role:rl,status:'ACTIVE'}});
+    const centralResetGeneration=await getCentralResetGeneration();
+    res.json({ok:true,token,sourceId:String(sourceId),profileKey:pk,assignmentId:`ASSIGN-${pk}`,centralResetGeneration,profile:{facility:f,inCharge:ic,designation:dg,role:rl,status:'ACTIVE'}});
   } catch(e) { next(e); }
 });
 
@@ -881,13 +901,16 @@ app.post('/api/admin/profiles/transfer', requireAdmin, async(req,res,next)=>{try
 /*
  * CENTRAL MASTER RESET
  * Deletes all application data but keeps database schema.
- * Devices/tokens are deleted too, forcing each office to authenticate again.
+ * A persistent reset generation invalidates every office cache so an old
+ * local copy can never repopulate the newly-empty Central database.
  */
 app.post('/api/admin/reset-database', requireAdmin, async(req,res,next)=>{
   try {
     const ts=nowIso();
     await run('BEGIN IMMEDIATE TRANSACTION');
+    let generation;
     try {
+      generation=(await getCentralResetGeneration())+1;
       await run('DELETE FROM central_registry');
       await run('DELETE FROM profile_aliases');
       await run('DELETE FROM profile_records');
@@ -897,18 +920,25 @@ app.post('/api/admin/reset-database', requireAdmin, async(req,res,next)=>{
       await run('DELETE FROM records');
       await run('DELETE FROM devices');
       await run('DELETE FROM profile_assignments');
+      await run(
+        `INSERT INTO system_meta(meta_key,meta_value) VALUES(?,?) ON CONFLICT(meta_key) DO UPDATE SET meta_value=excluded.meta_value`,
+        ['central_reset_generation',String(generation)]
+      );
       await run('COMMIT');
     } catch(e) {
       try{await run('ROLLBACK');}catch(_){}
       throw e;
     }
-
-    /* Physically trim SQLite WAL/cache pages after the purge. */
     try { await run('PRAGMA wal_checkpoint(TRUNCATE)'); } catch(_) {}
     try { await exec('VACUUM'); } catch(_) {}
-
-    io.emit('qlog:central_reset',{ok:true,at:ts});
-    res.json({ok:true,reset:true,at:ts,message:'Central database records and synchronization cache were deleted.'});
+    io.emit('qlog:central_reset',{ok:true,at:ts,centralResetGeneration:generation});
+    res.json({
+      ok:true,
+      reset:true,
+      centralResetGeneration:generation,
+      at:ts,
+      message:'Central database was completely reset. All Central records, profiles, devices, synchronization caches, aliases, cursors, events and the school-wide dedup registry were deleted. All office caches are invalidated and cannot re-upload old data.'
+    });
   }catch(e){next(e);}
 });
 
