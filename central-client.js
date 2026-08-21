@@ -15,6 +15,7 @@
   var RECONCILE_PREFIX = 'qlogCentralReconcileAt::';
   var CACHE_PREFIX = 'qlogProfileCache::';
   var RESET_KEY = 'qlogCentralResetRequested';
+  var CENTRAL_RESET_GENERATION_KEY = 'qlogCentralResetGeneration';
   var RESET_HOLD_KEY = 'qlogCentralResetHold::';
   var DELETE_QUEUE_PREFIX = 'qlogCentralDeleteQueue::';
 
@@ -274,6 +275,31 @@
     localStorage.removeItem(RESET_HOLD_KEY+hashScope(scope));
   }
 
+  function clearAllCentralClientCaches(){
+    var prefixes=[CACHE_PREFIX,RECONCILE_PREFIX,DELETE_QUEUE_PREFIX,RESET_HOLD_KEY];
+    var exact=[RESET_KEY,TOKEN_KEY,ACTIVE_PROFILE_KEY,ACTIVE_FACILITY_KEY,ACCESS_HINT_KEY];
+    var keys=[];
+    for(var i=0;i<localStorage.length;i++){
+      var key=localStorage.key(i);
+      if(!key)continue;
+      for(var p=0;p<prefixes.length;p++){
+        if(key.indexOf(prefixes[p])===0){keys.push(key);break;}
+      }
+    }
+    keys.forEach(function(key){localStorage.removeItem(key);});
+    exact.forEach(function(key){localStorage.removeItem(key);});
+    ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'].forEach(function(name){
+      localStorage.removeItem(name);
+      try{localStorage.setItem(name,'[]');}catch(e){}
+    });
+    state.token='';
+    state.activeProfileKey='';
+    state.activeFacility='';
+    state.pending.clear();
+    window.people=[];window.logs=[];window.books=[];window.borrowLogs=[];window.reservations=[];window.auditLogs=[];window.equipment=[];window.equipLogs=[];
+    refreshUi();
+  }
+
   async function requestProfileRebuild(){
     if(!state.token||!navigator.onLine||!currentFacility()||!currentInCharge()) throw new Error('PROFILE_AUTH_REQUIRED');
     try{
@@ -367,11 +393,34 @@
       var d=await fetch(API_BASE+'/api/auth/device',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accessCode:code,sourceId:state.sourceId,facility:facility,inCharge:inCharge,designation:currentDesignation(),role:currentRole()})});
       var j=await d.json().catch(function(){return{};}); if(!d.ok)throw new Error(j.error||('HTTP '+d.status));
       state.token=j.token; state.activeFacility=facility; state.activeProfileKey=j.profileKey||scopeId();
-      localStorage.setItem(TOKEN_KEY,state.token); localStorage.setItem(ACTIVE_FACILITY_KEY,facility); localStorage.setItem(ACTIVE_PROFILE_KEY,state.activeProfileKey); localStorage.setItem(ACCESS_HINT_KEY,new Date().toISOString());
+      var serverGeneration=Number(j.centralResetGeneration||0);
+      var storedGenerationRaw=localStorage.getItem(CENTRAL_RESET_GENERATION_KEY);
+      var storedGeneration=storedGenerationRaw===null?null:Number(storedGenerationRaw);
+      var resetGenerationMismatch=(serverGeneration>0 && storedGeneration!==serverGeneration);
+
+      if(resetGenerationMismatch){
+        clearAllCentralClientCaches();
+        state.token=j.token;
+        state.activeFacility=facility;
+        state.activeProfileKey=j.profileKey||scopeId();
+      }
+
+      localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String(serverGeneration));
+      localStorage.setItem(TOKEN_KEY,state.token);
+      localStorage.setItem(ACTIVE_FACILITY_KEY,facility);
+      localStorage.setItem(ACTIVE_PROFILE_KEY,state.activeProfileKey);
+      localStorage.setItem(ACCESS_HINT_KEY,new Date().toISOString());
+
       var resetRequested=!!localStorage.getItem(RESET_KEY);
       var held=localResetHeld(currentScope());
       var cached=hasProfileCache(currentScope());
-      if(held){
+
+      if(resetGenerationMismatch){
+        PROFILE_DATASETS.forEach(function(name){setDatasetLocal(name,[],false);});
+        localStorage.removeItem(RESET_KEY);
+        clearLocalResetHold(currentScope());
+        setStatus('Central database was reset. '+scopeLabel()+' is EMPTY. Click Rebuild My Office Data only if you intentionally want to restore Central data.','warn');
+      }else if(held){
         PROFILE_DATASETS.forEach(function(name){setDatasetLocal(name,[],false);});
         setStatus('Connected to Central. Local device is reset; use Rebuild My Office Data to restore.','warn');
       }else if(resetRequested || !cached){
@@ -481,24 +530,13 @@
             if(evt.profileKey && state.activeProfileKey && evt.profileKey!==state.activeProfileKey)return;
             reconcile();
           });
-          state.socket.on('qlog:central_reset',function(){
-            /* Central Admin wiped the master database: remove local profile caches too. */
+          state.socket.on('qlog:central_reset',function(evt){
             try{
               state.suppress=true;
-              PROFILE_DATASETS.forEach(function(name){
-                localStorage.removeItem(name);
-                localStorage.removeItem(cacheKey(currentScope(),name));
-              });
-              localStorage.removeItem(reconcileKey(currentScope()));
-              clearDeleteQueue(currentScope());
-              localStorage.removeItem(TOKEN_KEY);
-              localStorage.removeItem(ACTIVE_PROFILE_KEY);
-              localStorage.removeItem(RESET_KEY);
-              localStorage.removeItem(RESET_HOLD_KEY+hashScope(currentScope()));
-              window.people=[];window.logs=[];window.books=[];window.borrowLogs=[];window.reservations=[];window.auditLogs=[];window.equipment=[];window.equipLogs=[];
+              clearAllCentralClientCaches();
+              localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String((evt&&evt.centralResetGeneration)||0));
             }finally{state.suppress=false;}
-            setStatus('Central database was reset. Sign in again and use Rebuild when instructed.','warn');
-            refreshUi();
+            setStatus('Central database was reset. ALL office local Central caches were invalidated. Sign in again; no records will return until Rebuild is explicitly clicked.','warn');
             openAuth();
           });
           state.socket.on('connect_error',function(){/* polling fallback */});
