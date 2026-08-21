@@ -23,6 +23,8 @@
   var PROFILE_DATASETS = ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'];
   var GLOBAL_DATASETS = ['configData','dynamicFilterData','borrowPolicies'];
 
+  var statusTimer = null;
+
   var state = {
     token: localStorage.getItem(TOKEN_KEY) || '',
     sourceId: localStorage.getItem(SOURCE_KEY) || '',
@@ -67,15 +69,20 @@
   function setStatus(text,kind){
     var el=document.getElementById('qlogCentralStatus');
     if(!el)return;
+    if(statusTimer) clearTimeout(statusTimer);
     el.textContent=text;
     el.dataset.kind=kind||'idle';
     el.title='Central database: '+text;
+    el.classList.add('show');
+    statusTimer=setTimeout(function(){
+      el.classList.remove('show');
+    },2600);
   }
 
   function injectUI(){
     if(document.getElementById('qlogCentralStatus')) return;
     var style=document.createElement('style');
-    style.textContent='.qlog-central-status{position:fixed;right:16px;bottom:16px;z-index:99999;padding:8px 12px;border-radius:999px;background:#0f172a;color:#fff;font:600 12px/1.2 Inter,Arial,sans-serif;box-shadow:0 4px 18px rgba(15,23,42,.2);opacity:.94}.qlog-central-status[data-kind="ok"]{background:#166534}.qlog-central-status[data-kind="warn"]{background:#a16207}.qlog-central-status[data-kind="err"]{background:#b91c1c}.qlog-central-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.55);z-index:100000;padding:20px}.qlog-central-card{width:min(460px,100%);background:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.25);font-family:Inter,Arial,sans-serif;color:#0f172a}.qlog-central-card h3{margin:0 0 8px}.qlog-central-card p{color:#475569;font-size:13px;line-height:1.5}.qlog-central-card input{width:100%;box-sizing:border-box;margin-top:10px}.qlog-central-card .actions{display:flex;gap:10px;margin-top:14px}.qlog-central-card button{flex:1}';
+    style.textContent='.qlog-central-status{position:fixed;left:50%;bottom:28px;transform:translateX(-50%) translateY(14px);z-index:99999;padding:9px 14px;border-radius:999px;background:#0f172a;color:#fff;font:600 12px/1.2 Inter,Arial,sans-serif;box-shadow:0 4px 18px rgba(15,23,42,.2);opacity:0;pointer-events:none;transition:opacity .2s ease,transform .2s ease}.qlog-central-status.show{opacity:.96;transform:translateX(-50%) translateY(0)}.qlog-central-status[data-kind="ok"]{background:#166534}.qlog-central-status[data-kind="warn"]{background:#a16207}.qlog-central-status[data-kind="err"]{background:#b91c1c}.qlog-central-modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(15,23,42,.55);z-index:100000;padding:20px}.qlog-central-card{width:min(460px,100%);background:#fff;border-radius:18px;padding:22px;box-shadow:0 20px 60px rgba(0,0,0,.25);font-family:Inter,Arial,sans-serif;color:#0f172a}.qlog-central-card h3{margin:0 0 8px}.qlog-central-card p{color:#475569;font-size:13px;line-height:1.5}.qlog-central-card input{width:100%;box-sizing:border-box;margin-top:10px}.qlog-central-card .actions{display:flex;gap:10px;margin-top:14px}.qlog-central-card button{flex:1}';
     document.head.appendChild(style);
     var status=document.createElement('div');
     status.id='qlogCentralStatus';
@@ -276,6 +283,15 @@
   }
 
   function clearAllCentralClientCaches(){
+    if(state.socket){
+      try{state.socket.disconnect();}catch(e){}
+      state.socket=null;
+    }
+    state.syncing=false;
+    state.reconciling=false;
+    state.pending.clear();
+    clearTimeout(state.timer);
+    state.timer=null;
     var prefixes=[CACHE_PREFIX,RECONCILE_PREFIX,DELETE_QUEUE_PREFIX,RESET_HOLD_KEY];
     var exact=[RESET_KEY,TOKEN_KEY,ACTIVE_PROFILE_KEY,ACTIVE_FACILITY_KEY,ACCESS_HINT_KEY];
     var keys=[];
@@ -298,6 +314,12 @@
     state.pending.clear();
     window.people=[];window.logs=[];window.books=[];window.borrowLogs=[];window.reservations=[];window.auditLogs=[];window.equipment=[];window.equipLogs=[];
     refreshUi();
+  }
+
+  async function activateSync(mode){
+    if(!state.token || !navigator.onLine) throw new Error('PROFILE_AUTH_REQUIRED');
+    var generation=Number(localStorage.getItem(CENTRAL_RESET_GENERATION_KEY)||0);
+    return await api('/api/device/activate-sync',{method:'POST',body:JSON.stringify({mode:mode||'existing',centralResetGeneration:generation})});
   }
 
   async function requestProfileRebuild(){
@@ -419,16 +441,20 @@
         PROFILE_DATASETS.forEach(function(name){setDatasetLocal(name,[],false);});
         localStorage.removeItem(RESET_KEY);
         clearLocalResetHold(currentScope());
+        await activateSync('empty');
         setStatus('Central database was reset. '+scopeLabel()+' is EMPTY. Click Rebuild My Office Data only if you intentionally want to restore Central data.','warn');
       }else if(held){
         PROFILE_DATASETS.forEach(function(name){setDatasetLocal(name,[],false);});
+        await activateSync('empty');
         setStatus('Connected to Central. Local device is reset; use Rebuild My Office Data to restore.','warn');
       }else if(resetRequested || !cached){
+        await activateSync('existing');
         await fullProfileReconcile();
         saveProfileCache(currentScope());
         localStorage.removeItem(RESET_KEY);
       }else{
         loadProfileCache(currentScope());
+        await activateSync('existing');
         await sync(true);
         await fullProfileReconcile();
       }
@@ -481,7 +507,8 @@
       state.pending.clear(); clearDeleteQueue(currentScope()); await reconcile();
       setStatus('Central sync complete · '+scopeLabel()+' · deduped '+((resp.deduped||[]).length),'ok');
     }catch(e){
-      if(e.status===401||e.status===403||e.status===409){state.token='';state.activeProfileKey='';localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(ACTIVE_PROFILE_KEY);setStatus('Profile authentication required','warn');openAuth();}
+      if(e.status===401||e.status===403){state.token='';state.activeProfileKey='';localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(ACTIVE_PROFILE_KEY);setStatus('Profile authentication required','warn');openAuth();}
+      else if(e.status===409 && e.data && (e.data.error==='SYNC_NOT_ACTIVATED'||e.data.error==='CENTRAL_RESET_REQUIRED')){setStatus('Central reset state detected. Reconnect before syncing.','warn');openAuth();}
       else setStatus('Central sync waiting for connection','warn');
     }finally{state.syncing=false;}
   }
@@ -533,10 +560,14 @@
           state.socket.on('qlog:central_reset',function(evt){
             try{
               state.suppress=true;
+              if(state.socket){
+                try{state.socket.disconnect();}catch(e){}
+                state.socket=null;
+              }
               clearAllCentralClientCaches();
               localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String((evt&&evt.centralResetGeneration)||0));
             }finally{state.suppress=false;}
-            setStatus('Central database was reset. ALL office local Central caches were invalidated. Sign in again; no records will return until Rebuild is explicitly clicked.','warn');
+            setStatus('Central database was reset. All local office caches were cleared. Sign in again.','warn');
             openAuth();
           });
           state.socket.on('connect_error',function(){/* polling fallback */});
