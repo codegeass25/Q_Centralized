@@ -135,5 +135,14 @@ async function exportVisitors(){try{const r=await fetch('/api/admin/visitors/exp
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 document.getElementById('adminPassword').addEventListener('keydown',e=>{if(e.key==='Enter')login();});
 </script>
+
+<script>
+window.addEventListener('load', function(){
+  var buttons = document.querySelectorAll('button[onclick*="resetEntireDatabase"]');
+  buttons.forEach(function(btn, index){
+    if(index > 0) btn.remove();
+  });
+});
+</script>
 </body>
 </html>
