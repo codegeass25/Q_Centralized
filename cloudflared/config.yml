@@ -1,0 +1,13 @@
+# QLog Pro Ultimate — Cloudflare Tunnel example
+# Tunnel name: pickleball-api
+# Replace <TUNNEL-UUID> and the credentials-file path with the file created by cloudflared tunnel login/create.
+# The GitHub Pages hostname qlogproult.mdmsportal.uk remains the frontend custom domain.
+# The tunnel's local origin is only the central API at qlog-api.mdmsportal.uk.
+
+tunnel: pickleball-api
+credentials-file: C:\Users\User\.cloudflared\127582a7-bd99-405b-90d7-d1a6989b6058.json
+
+ingress:
+  - hostname: qlog-api.mdmsportal.uk
+    service: http://127.0.0.1:8400
+  - service: http_status:404

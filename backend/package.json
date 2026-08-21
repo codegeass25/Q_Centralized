@@ -1,0 +1,21 @@
+{
+  "name": "qlog-pro-ultimate-central",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Central SQLite3 + Socket.IO backend for QLog Pro Ultimate",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "socket.io": "^4.8.1",
+    "sqlite3": "^5.1.7"
+  }
+}

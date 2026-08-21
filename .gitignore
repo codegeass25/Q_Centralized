@@ -1,0 +1,10 @@
+node_modules/
+_site/
+# Build-generated installation gate data (never commit generated verifiers)
+/install-gate.generated.js
+
+backend/node_modules/
+backend/.env
+backend/data/*.sqlite3
+backend/data/*.sqlite3-shm
+backend/data/*.sqlite3-wal

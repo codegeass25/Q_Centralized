@@ -1,0 +1,75 @@
+name: Build & Deploy QLog Pro Ultimate (GitHub Pages)
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies (if a package manifest exists)
+        run: |
+          if [ -f package-lock.json ]; then npm ci
+          elif [ -f package.json ]; then npm install
+          else echo "No package.json - static PWA, nothing to install."; fi
+
+      - name: Assemble production site
+        run: |
+          mkdir -p _site
+          rsync -a --exclude '.git' --exclude '.github' --exclude 'scripts' \
+                --exclude 'node_modules' --exclude '_site' ./ _site/
+
+      - name: Generate Installation Password verification data
+        env:
+          QLOG_INSTALLATION_PASSWORD: ${{ secrets.QLOG_INSTALLATION_PASSWORD }}
+        run: |
+          if [ -z "$QLOG_INSTALLATION_PASSWORD" ]; then
+            echo "::error::Repository secret QLOG_INSTALLATION_PASSWORD is missing. See INSTALLATION_PASSWORD_GITHUB_SETUP.md"
+            exit 1
+          fi
+          node scripts/generate-install-gate.mjs _site/install-gate.js
+
+      - name: Verify no plaintext password leaked into the build
+        env:
+          QLOG_INSTALLATION_PASSWORD: ${{ secrets.QLOG_INSTALLATION_PASSWORD }}
+        run: |
+          if grep -RqF -- "$QLOG_INSTALLATION_PASSWORD" _site; then
+            echo "::error::Plaintext Installation Password found in build output. Deployment aborted."
+            exit 1
+          fi
+          echo "Verified: plaintext Installation Password is not present in the build output."
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
