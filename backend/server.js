@@ -102,8 +102,6 @@ async function initDb(){
     CREATE INDEX IF NOT EXISTS idx_records_dataset_date ON records(dataset,record_date);
     CREATE INDEX IF NOT EXISTS idx_records_dataset_fingerprint ON records(dataset,fingerprint);
     CREATE INDEX IF NOT EXISTS idx_records_source_updated ON records(source_id,updated_at);
-    CREATE INDEX IF NOT EXISTS idx_records_profile_updated ON records(profile_key,updated_at);
-    CREATE INDEX IF NOT EXISTS idx_records_profile_fingerprint ON records(profile_key,dataset,fingerprint);
     CREATE TABLE IF NOT EXISTS sync_aliases (
       source_id TEXT NOT NULL, dataset TEXT NOT NULL, incoming_key TEXT NOT NULL,
       canonical_source_id TEXT NOT NULL, canonical_key TEXT NOT NULL, fingerprint TEXT NOT NULL,
@@ -126,6 +124,10 @@ async function initDb(){
     "ALTER TABLE records ADD COLUMN profile_key TEXT NOT NULL DEFAULT ''"
   ]) { try { await run(stmt); } catch(e) { if(!/duplicate column/i.test(e.message)) throw e; } }
 
+  await exec(`
+    CREATE INDEX IF NOT EXISTS idx_records_profile_updated ON records(profile_key,updated_at);
+    CREATE INDEX IF NOT EXISTS idx_records_profile_fingerprint ON records(profile_key,dataset,fingerprint);
+  `);
   const deviceRowsForProfile = await all("SELECT source_id,facility,in_charge FROM devices WHERE profile_key='' OR profile_key IS NULL");
   for (const d of deviceRowsForProfile) await run('UPDATE devices SET profile_key=? WHERE source_id=?',[profileKey(d.facility,d.in_charge),d.source_id]);
   const recordRowsForProfile = await all("SELECT r.source_id,d.facility,d.in_charge FROM records r LEFT JOIN devices d ON d.source_id=r.source_id WHERE (r.profile_key='' OR r.profile_key IS NULL)");
