@@ -446,85 +446,118 @@ async function initDb() {
   `);
 }
 
+let globalRegistryRebuildPromise = null;
+
 async function rebuildGlobalRegistry(){
-  await run('DELETE FROM central_registry');
-
-  const rows = await all(`
-    SELECT
-      profile_key,
-      dataset,
-      record_key,
-      record_json,
-      fingerprint,
-      updated_at,
-      revision,
-      deleted_at,
-      facility,
-      in_charge
-    FROM profile_records
-    WHERE deleted_at IS NULL
-      AND dataset IN ('people','books','equipment')
-    ORDER BY updated_at DESC, revision DESC
-  `);
-
-  const counts = await all(`
-    SELECT
-      dataset,
-      fingerprint AS identity_key,
-      COUNT(*) AS occurrences
-    FROM profile_records
-    WHERE deleted_at IS NULL
-      AND dataset IN ('people','books','equipment')
-      AND fingerprint <> ''
-    GROUP BY dataset, fingerprint
-  `);
-
-  const occMap = new Map();
-  for (const row of counts) {
-    occMap.set(
-      row.dataset + '|' + row.identity_key,
-      Number(row.occurrences || 0)
-    );
+  // Serialize every rebuild. Multiple simultaneous sync/admin requests used to
+  // DELETE and INSERT into central_registry at the same time, causing
+  // UNIQUE constraint failures on (dataset, identity_key).
+  if (globalRegistryRebuildPromise) {
+    return globalRegistryRebuildPromise;
   }
 
-  const seen = new Set();
+  globalRegistryRebuildPromise = (async () => {
+    await run('BEGIN IMMEDIATE TRANSACTION');
+    try {
+      await run('DELETE FROM central_registry');
 
-  for (const row of rows) {
-    const obj = safeJson(row.record_json, {});
-    const identity = row.fingerprint || recordFingerprint(row.dataset, obj);
-    if (!identity) continue;
+      const rows = await all(`
+        SELECT
+          profile_key,
+          dataset,
+          record_key,
+          record_json,
+          fingerprint,
+          updated_at,
+          revision,
+          deleted_at,
+          facility,
+          in_charge
+        FROM profile_records
+        WHERE deleted_at IS NULL
+          AND dataset IN ('people','books','equipment')
+        ORDER BY updated_at DESC, revision DESC
+      `);
 
-    const key = row.dataset + '|' + identity;
-    if (seen.has(key)) continue;
-    seen.add(key);
+      const counts = await all(`
+        SELECT
+          dataset,
+          fingerprint AS identity_key,
+          COUNT(*) AS occurrences
+        FROM profile_records
+        WHERE deleted_at IS NULL
+          AND dataset IN ('people','books','equipment')
+          AND fingerprint <> ''
+        GROUP BY dataset, fingerprint
+      `);
 
-    await run(`
-      INSERT INTO central_registry(
-        dataset,
-        identity_key,
-        record_json,
-        content_hash,
-        updated_at,
-        revision,
-        occurrences,
-        last_profile_key,
-        last_facility,
-        last_in_charge
-      )
-      VALUES(?,?,?,?,?,?,?,?,?,?)
-    `,[
-      row.dataset,
-      identity,
-      row.record_json,
-      contentHash(obj),
-      row.updated_at,
-      row.revision || 1,
-      occMap.get(key) || 0,
-      row.profile_key,
-      row.facility || '',
-      row.in_charge || ''
-    ]);
-  }
+      const occMap = new Map();
+      for (const row of counts) {
+        occMap.set(
+          row.dataset + '|' + row.identity_key,
+          Number(row.occurrences || 0)
+        );
+      }
+
+      const seen = new Set();
+
+      for (const row of rows) {
+        const obj = safeJson(row.record_json, {});
+        const identity = row.fingerprint || recordFingerprint(row.dataset, obj);
+        if (!identity) continue;
+
+        const key = row.dataset + '|' + identity;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        // UPSERT is an additional safety net even though the rebuild is locked.
+        await run(`
+          INSERT INTO central_registry(
+            dataset,
+            identity_key,
+            record_json,
+            content_hash,
+            updated_at,
+            revision,
+            occurrences,
+            last_profile_key,
+            last_facility,
+            last_in_charge
+          )
+          VALUES(?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(dataset,identity_key) DO UPDATE SET
+            record_json=excluded.record_json,
+            content_hash=excluded.content_hash,
+            updated_at=excluded.updated_at,
+            revision=excluded.revision,
+            occurrences=excluded.occurrences,
+            last_profile_key=excluded.last_profile_key,
+            last_facility=excluded.last_facility,
+            last_in_charge=excluded.last_in_charge
+        `,[
+          row.dataset,
+          identity,
+          row.record_json,
+          contentHash(obj),
+          row.updated_at,
+          row.revision || 1,
+          occMap.get(key) || 0,
+          row.profile_key,
+          row.facility || '',
+          row.in_charge || ''
+        ]);
+      }
+
+      await run('COMMIT');
+    } catch (e) {
+      try { await run('ROLLBACK'); } catch (_) {}
+      throw e;
+    }
+  })().finally(() => {
+    globalRegistryRebuildPromise = null;
+  });
+
+  return globalRegistryRebuildPromise;
 }
 
 async function refreshGlobalIdentity(dataset, identity) {
@@ -968,6 +1001,29 @@ app.post('/api/sync', requireDevice, async(req,res,next)=>{
       await rebuildGlobalRegistry();
     }
 
+    const liveSummaryRows = await Promise.all([
+      get('SELECT COUNT(*) n FROM devices'),
+      get("SELECT COUNT(*) n FROM profile_assignments WHERE status='ACTIVE'"),
+      get("SELECT COUNT(*) n FROM central_registry WHERE dataset='people'"),
+      get("SELECT COUNT(*) n FROM central_registry WHERE dataset='books'"),
+      get("SELECT COUNT(*) n FROM central_registry WHERE dataset='equipment'"),
+      get("SELECT COUNT(*) n FROM profile_records WHERE dataset='logs' AND deleted_at IS NULL"),
+      get("SELECT COUNT(*) n FROM profile_records WHERE dataset='logs' AND deleted_at IS NULL AND UPPER(record_json) LIKE '%\"category\":\"VISITOR\"%'"),
+      get("SELECT COUNT(*) n FROM profile_records WHERE dataset='borrowLogs' AND deleted_at IS NULL"),
+      get("SELECT COUNT(*) n FROM profile_records WHERE dataset='equipLogs' AND deleted_at IS NULL")
+    ]);
+    const liveSummary={
+      devices:liveSummaryRows[0].n,
+      activeProfiles:liveSummaryRows[1].n,
+      people:liveSummaryRows[2].n,
+      books:liveSummaryRows[3].n,
+      equipment:liveSummaryRows[4].n,
+      logs:liveSummaryRows[5].n,
+      visitors:liveSummaryRows[6].n,
+      borrowLogs:liveSummaryRows[7].n,
+      equipLogs:liveSummaryRows[8].n
+    };
+
     const event={
       sourceId:req.device.source_id,
       profileKey:req.device.profile_key,
@@ -977,7 +1033,8 @@ app.post('/api/sync', requireDevice, async(req,res,next)=>{
       datasets:Array.from(changed),
       at:ts,
       counts:{accepted:accepted.length,deduped:deduped.length,deleted:deleted.length},
-      globalDedupDatasets:Array.from(new Set(accepted.filter(x=>GLOBAL_DATASETS.has(x.dataset)).map(x=>x.dataset)))
+      globalDedupDatasets:Array.from(new Set(accepted.filter(x=>GLOBAL_DATASETS.has(x.dataset)).map(x=>x.dataset))),
+      summary:liveSummary
     };
     await emitUpdated(event);
 
@@ -994,7 +1051,6 @@ app.post('/api/admin/login', async(req,res)=>{
 
 app.get('/api/admin/summary', requireAdmin, async(req,res,next)=>{
   try {
-    await rebuildGlobalRegistry();
     const [devices,profiles,logs,visitors,people,books,borrowLogs,equipment,equipLogs]=await Promise.all([
       get('SELECT COUNT(*) n FROM devices'),
       get("SELECT COUNT(*) n FROM profile_assignments WHERE status='ACTIVE'"),
@@ -1013,7 +1069,6 @@ app.get('/api/admin/summary', requireAdmin, async(req,res,next)=>{
 
 app.get('/api/admin/global', requireAdmin, async(req,res,next)=>{
   try{
-    await rebuildGlobalRegistry();
     const dataset=String(req.query.dataset||'people');
     if(!GLOBAL_DATASETS.has(dataset)) return res.status(400).json({ok:false,error:'INVALID_GLOBAL_DATASET'});
     const limit=Math.min(Math.max(Number(req.query.limit||5000),1),20000);
