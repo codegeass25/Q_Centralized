@@ -10,7 +10,7 @@
      service-worker update.
    ===================================================================== */
 
-const CACHE_NAME = "qlogpro-offline-v18-live-registry-inline-edit";
+const CACHE_NAME = "qlogpro-offline-v19-visitor-central-equipment-export-fix";
 
 const PRECACHE_URLS = [
   "./",
