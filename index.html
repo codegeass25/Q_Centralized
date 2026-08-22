@@ -5867,6 +5867,7 @@ async function saveEquipmentItem(){
         eqAudit('EQUIPMENT_ADD', id + ' - ' + name + ' @ ' + unit + ' | qty=' + qty);
     }
     saveEquipData();
+    if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ window.QLogCentral.syncDatasets(['equipment','equipLogs']); }
     document.getElementById('eqNewId').value = '';
     document.getElementById('eqNewName').value = '';
     document.getElementById('eqNewCategory').value = '';
@@ -5912,6 +5913,8 @@ function eqStatusBadge(status){
     return '<span style="font-weight:700;color:' + c + ';">' + eqEsc(status) + '</span>';
 }
 
+var editingEquipmentId = null;
+
 function renderEquipRegistry(){
     var q = (document.getElementById('eqRegistrySearch') || {}).value || '';
     var st = (document.getElementById('eqRegistryStatus') || {}).value || 'ALL';
@@ -5932,8 +5935,14 @@ function renderEquipRegistry(){
         var act = eqActiveLogFor(e.id);
         var qty = eqQty(e), availableQty = eqAvailableQty(e);
         var mine = sameUnit(e.unit, currentSession.facility);
+        var editing = editingEquipmentId === e.id && mine;
         var actions = '';
-        if(mine){
+
+        if(editing){
+            actions =
+                '<button style="background:#16a34a;padding:4px 8px;font-size:12px;" onclick="saveEquipmentInline(\'' + eqEsc(e.id) + '\')">Save</button> ' +
+                '<button style="background:#64748b;padding:4px 8px;font-size:12px;" onclick="cancelEquipmentInline()">Cancel</button>';
+        }else if(mine){
             actions += '<button style="background:#3b82f6;padding:4px 8px;font-size:12px;" onclick="editEquipmentItem(\'' + eqEsc(e.id) + '\')">Edit</button> ';
             if(!act){
                 if(e.status !== 'AVAILABLE') actions += '<button style="background:#16a34a;padding:4px 8px;font-size:12px;" onclick="setEquipmentStatus(\'' + eqEsc(e.id) + '\',\'AVAILABLE\')">Available</button> ';
@@ -5941,13 +5950,126 @@ function renderEquipRegistry(){
                 if(e.status !== 'DAMAGED') actions += '<button style="background:#b91c1c;padding:4px 8px;font-size:12px;" onclick="setEquipmentStatus(\'' + eqEsc(e.id) + '\',\'DAMAGED\')">Damaged</button> ';
                 actions += '<button style="background:#dc2626;padding:4px 8px;font-size:12px;" onclick="deleteEquipmentItem(\'' + eqEsc(e.id) + '\')">Delete</button>';
             }
-        } else { actions = '<span style="font-size:12px;color:#94a3b8;">Other unit</span>'; }
-        html += '<tr><td>' + eqEsc(e.id) + '</td><td>' + eqEsc(e.name) + '</td><td>' + eqEsc(e.category||'') + '</td><td>' + qty + '</td><td>' + availableQty + '</td><td>' + eqEsc(e.unit) + '</td><td>' + eqEsc(e.condition||'') + '</td><td>' + eqStatusBadge(e.status) + '</td><td>' + (act ? eqEsc(act.borrowerName) + '<br><span style="font-size:11px;color:#64748b;">' + eqEsc(act.borrowerId) + '</span>' : '--') + '</td>' +
+        } else {
+            actions = '<span style="font-size:12px;color:#94a3b8;">Other unit</span>';
+        }
+
+        var rowClass = editing ? ' style="background:#ecfeff;"' : '';
+        var nameCell = editing
+            ? '<input id="eqInlineName-' + eqEsc(e.id) + '" value="' + eqEsc(e.name) + '" style="width:180px;padding:5px;border:1px solid #94a3b8;border-radius:7px;">'
+            : eqEsc(e.name);
+        var catCell = editing
+            ? '<input id="eqInlineCat-' + eqEsc(e.id) + '" value="' + eqEsc(e.category||'') + '" style="width:130px;padding:5px;border:1px solid #94a3b8;border-radius:7px;">'
+            : eqEsc(e.category||'');
+        var qtyCell = editing
+            ? '<input id="eqInlineQty-' + eqEsc(e.id) + '" type="number" min="1" value="' + qty + '" style="width:72px;padding:5px;border:1px solid #94a3b8;border-radius:7px;">'
+            : qty;
+        var unitCell = editing
+            ? '<span style="font-weight:700;">' + eqEsc(e.unit) + '</span>'
+            : eqEsc(e.unit);
+        var conditionCell = editing
+            ? '<select id="eqInlineCond-' + eqEsc(e.id) + '" style="padding:5px;border:1px solid #94a3b8;border-radius:7px;"><option>Good</option><option>Damaged</option><option>For Maintenance</option></select>'
+            : eqEsc(e.condition||'');
+
+        html += '<tr' + rowClass + '><td>' + eqEsc(e.id) + '</td><td>' + nameCell + '</td><td>' + catCell + '</td><td>' + qtyCell + '</td><td>' + availableQty + '</td><td>' + unitCell + '</td><td>' + conditionCell + '</td><td>' + eqStatusBadge(e.status) + '</td><td>' + (act ? eqEsc(act.borrowerName) + '<br><span style="font-size:11px;color:#64748b;">' + eqEsc(act.borrowerId) + '</span>' : '--') + '</td>' +
             '<td><button style="background:#0f172a;padding:4px 8px;font-size:12px;" onclick="showEquipmentQr(\'' + eqEsc(e.id) + '\')">QR</button> ' +
             '<button style="background:#7c3aed;padding:4px 8px;font-size:12px;" onclick="openEquipmentHistory(\'' + eqEsc(e.id) + '\')">History</button></td>' +
             '<td>' + actions + '</td></tr>';
     });
     document.getElementById('eqRegistryTbl').innerHTML = html || '<tr><td colspan="11">No equipment registered yet. Add items using the form above.</td></tr>';
+
+    // Apply the current condition selection to any inline editor.
+    if(editingEquipmentId){
+        var editItem = findEquipment(editingEquipmentId);
+        var sel = document.getElementById('eqInlineCond-' + editingEquipmentId);
+        if(sel && editItem) sel.value = editItem.condition || 'Good';
+    }
+}
+
+function editEquipmentItem(id){
+    var it = findEquipment(id);
+    if(!it) return;
+    if(!sameUnit(it.unit, currentSession.facility)){
+        toast('⛔ Only ' + it.unit + ' can edit this equipment.','red',3500);
+        return;
+    }
+    editingEquipmentId = id;
+    renderEquipRegistry();
+    var rowInput = document.getElementById('eqInlineName-' + id);
+    if(rowInput){ rowInput.focus(); try{ rowInput.select(); }catch(e){} }
+}
+
+function cancelEquipmentInline(){
+    editingEquipmentId = null;
+    renderEquipRegistry();
+}
+
+async function saveEquipmentInline(id){
+    var it = findEquipment(id);
+    if(!it) return;
+    if(!sameUnit(it.unit, currentSession.facility)){
+        toast('⛔ Only ' + it.unit + ' can edit this equipment.','red',3500);
+        return;
+    }
+
+    var nameEl = document.getElementById('eqInlineName-' + id);
+    var catEl = document.getElementById('eqInlineCat-' + id);
+    var qtyEl = document.getElementById('eqInlineQty-' + id);
+    var condEl = document.getElementById('eqInlineCond-' + id);
+
+    var name = nameEl ? nameEl.value.trim() : it.name;
+    var category = catEl ? catEl.value.trim() : it.category;
+    var qty = Math.max(1, parseInt(qtyEl ? qtyEl.value : eqQty(it), 10) || 1);
+    var condition = condEl ? condEl.value : (it.condition || 'Good');
+
+    if(!name){
+        toast('⚠️ Equipment name is required.','red',3500);
+        return;
+    }
+
+    var borrowedQty = eqBorrowedQty(it.id);
+    if(qty < borrowedQty){
+        toast('⛔ Quantity cannot be lower than the ' + borrowedQty + ' unit(s) currently borrowed.','red',4500);
+        return;
+    }
+
+    try{
+        if(window.QLogCentral && typeof window.QLogCentral.checkInventoryBatch === 'function'){
+            var check = await window.QLogCentral.checkInventoryBatch('equipment',[{
+                id:it.id,
+                name:name,
+                category:category || 'General',
+                unit:it.unit,
+                qty:qty,
+                condition:condition
+            }]);
+            var conflict = check && check.conflicts && check.conflicts.length ? check.conflicts[0] : null;
+            if(conflict && conflict.reason === 'ALREADY_ASSIGNED_TO_OTHER_PROFILE'){
+                var owner = conflict.existingFacility || 'another office/laboratory';
+                var person = conflict.existingInCharge ? ' under ' + conflict.existingInCharge : '';
+                toast('⛔ Already registered in ' + owner + person + '.','red',5000);
+                return;
+            }
+        }
+
+        it.name = name;
+        it.category = category || it.category || 'General';
+        it.condition = condition;
+        it.qty = qty;
+        eqNormalizeItemState(it);
+
+        saveEquipData();
+        if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){
+            window.QLogCentral.syncDatasets(['equipment','equipLogs']);
+        }
+
+        editingEquipmentId = null;
+        refreshEquipmentUI();
+        eqAudit('EQUIPMENT_UPDATE_INLINE', it.id + ' - ' + it.name + ' @ ' + it.unit + ' | qty=' + qty);
+        toast('✅ Equipment updated: ' + it.id + ' • Qty ' + qty + ' • Central sync queued.','green',3200);
+    }catch(e){
+        toast('⛔ Equipment update was not saved — Central verification failed.','red',4500);
+    }
 }
 
 function exportEquipRegistry(){
