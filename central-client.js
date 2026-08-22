@@ -497,14 +497,14 @@
   }
 
   async function sync(forceAll){
-    if(state.syncing||!navigator.onLine||!state.token||!state.activeProfileKey)return;
-    if(state.activeProfileKey!==scopeId())return;
+    if(state.syncing||!navigator.onLine||!state.token||!state.activeProfileKey)return false;
+    if(state.activeProfileKey!==scopeId())return false;
     state.syncing=true;
     try{
       var names=forceAll?SYNC_KEYS.slice():Array.from(state.pending);
       var deleteQueue=readDeleteQueue(currentScope());
       var hasDeletes=Object.keys(deleteQueue).some(function(k){return Array.isArray(deleteQueue[k])&&deleteQueue[k].length;});
-      if(!names.length && !hasDeletes)return;
+      if(!names.length && !hasDeletes)return true;
       var snap=snapshot(names);
       ['books','equipment'].forEach(function(n){
         if(Object.prototype.hasOwnProperty.call(snap,n)){
@@ -514,10 +514,12 @@
       var resp=await api('/api/sync',{method:'POST',body:JSON.stringify({version:'5.0.0',client:'QLog Pro Ultimate',datasets:snap,deletions:deleteQueue,device:{facility:currentFacility(),inCharge:currentInCharge(),designation:currentDesignation(),role:currentRole()}})});
       state.pending.clear(); clearDeleteQueue(currentScope()); await reconcile();
       setStatus('Central sync complete · '+scopeLabel()+' · deduped '+((resp.deduped||[]).length),'ok');
+      return true;
     }catch(e){
       if(e.status===401||e.status===403){state.token='';state.activeProfileKey='';localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(ACTIVE_PROFILE_KEY);setStatus('Profile authentication required','warn');openAuth();}
       else if(e.status===409 && e.data && (e.data.error==='SYNC_NOT_ACTIVATED'||e.data.error==='CENTRAL_RESET_REQUIRED')){setStatus('Central reset state detected. Reconnect before syncing.','warn');openAuth();}
       else setStatus('Central sync waiting for connection','warn');
+      return false;
     }finally{state.syncing=false;}
   }
   function schedule(names){
@@ -625,11 +627,19 @@
     return await api('/api/inventory/check-batch',{method:'POST',body:JSON.stringify({dataset:dataset,items:Array.isArray(items)?items:[]})});
   }
 
+  async function syncDatasetsNow(names){
+    schedule(names||SYNC_KEYS);
+    clearTimeout(state.timer);
+    state.timer=null;
+    return await sync(false);
+  }
+
   window.QLogCentral={
     connect:function(){var i=document.getElementById('qlogCentralCode');if(i)connectWithCode(i.value.trim());},
     closeAuth:closeAuth,
     sync:function(){schedule(SYNC_KEYS);sync(true);},
     syncDatasets:function(names){schedule(names||SYNC_KEYS);sync(false);},
+    syncDatasetsNow:syncDatasetsNow,
     resetDevice:resetThisDevice,
     rebuildMyOffice:rebuildMyOffice,
     getDeleteQueue:function(){return readDeleteQueue(currentScope());},
