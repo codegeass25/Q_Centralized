@@ -5387,7 +5387,7 @@ function commitStagedTransaction() {
             dueDate.setDate(borrowDate.getDate() + policy.days);
 
             borrowLogs.push({
-                l: item.lId, learnerName: item.learnerName, gs: item.gs, b: item.isbn, bookTitle: item.title, qty: borrowQty, s: 'BORROWED',
+                l: item.lId, learnerName: item.learnerName, gs: item.gs, b: item.isbn, title: item.title || '', qty: borrowQty, s: 'BORROWED',
                 borrowedAt: borrowDate.toLocaleString(), dueDateStr: dueDate.toLocaleDateString(), dueDateMs: dueDate.getTime(),
                 returnedAt: "", overdueDays: 0, extensions: 0, remarks: ""
             });
@@ -5443,7 +5443,7 @@ function triggerReservationFulfillment(isbn) {
         
         borrowLogs.push({
             l: nextTarget.lId, learnerName: learner.name, gs: ((learner.grade||'') + ' ' + (learner.section||'')).trim(),
-            b: nextTarget.isbn, qty: nextTarget.qty || 1, s: 'BORROWED', borrowedAt: borrowDate.toLocaleString(),
+            b: nextTarget.isbn, title: (books.filter(function(x){ return String(x.isbn).trim() === String(nextTarget.isbn).trim() || String(x.id).trim() === String(nextTarget.isbn).trim(); })[0] || {}).title || '', qty: nextTarget.qty || 1, s: 'BORROWED', borrowedAt: borrowDate.toLocaleString(),
             dueDateStr: dueDate.toLocaleDateString(), dueDateMs: dueDate.getTime(), returnedAt: "", overdueDays: 0,
             extensions: 0, remarks: "Auto-fulfilled from Reservation Queue System"
         });
@@ -5577,7 +5577,7 @@ function renderBorrow(){
             '<td>' + r.l + '</td>' +
             '<td>' + r.learnerName + '</td>' +
             '<td>' + r.b + '</td>' +
-            '<td>' + (r.title || r.b) + '</td>' +
+            '<td>' + (r.title || (books.filter(function(x){return String(x.isbn).trim()===String(r.b).trim() || String(x.id).trim()===String(r.b).trim();})[0]||{}).title || r.b) + '</td>' +
             '<td>' + (r.qty || 1) + '</td>' +
             '<td style="color:' + statColor + '; font-weight:bold;">' + r.s + '</td>' +
             '<td>' + r.borrowedAt + '</td>' +
@@ -5680,8 +5680,10 @@ var _eqPendingReturnRef = null;
 var _eqQrCurrent = null;
 
 function saveEquipData(){
+    eqSyncAllStatuses();
     localStorage.setItem('equipment', JSON.stringify(equipment));
     localStorage.setItem('equipLogs', JSON.stringify(equipLogs));
+    try{ if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ window.QLogCentral.syncDatasets(['equipment','equipLogs']); } }catch(e){}
 }
 
 /* ---------- Role / visibility detection ---------- */
@@ -5761,8 +5763,11 @@ function eqQty(item){
 }
 function eqBorrowedQty(eqId){
     return equipLogs.reduce(function(sum,l){
-        return sum + (l.eqId === eqId && (l.s === 'BORROWED' || l.s === 'OVERDUE') ? Math.max(1,parseInt(l.qty,10)||1) : 0);
+        return sum + (sameUnit(l.unit,(findEquipment(eqId)||{}).unit) && l.eqId === eqId && (l.s === 'BORROWED' || l.s === 'OVERDUE') ? Math.max(1,parseInt(l.qty,10)||1) : 0);
     },0);
+}
+function eqHasOverdue(eqId){
+    return equipLogs.some(function(l){return l.eqId === eqId && l.s === 'OVERDUE';});
 }
 function eqAvailableQty(item){
     if(!item) return 0;
@@ -5772,8 +5777,14 @@ function eqAvailableQty(item){
 }
 function eqNormalizeItemState(item){
     if(!item) return;
-    if(item.status === 'DAMAGED' || item.status === 'MAINTENANCE') return;
-    item.status = eqAvailableQty(item) > 0 ? 'AVAILABLE' : 'BORROWED';
+    var hasOverdue = eqHasOverdue(item.id);
+    var borrowed = eqBorrowedQty(item.id);
+    if(item.condition === 'Damaged' || item.status === 'DAMAGED'){ item.status='DAMAGED'; return; }
+    if(item.condition === 'For Maintenance' || item.status === 'MAINTENANCE'){ item.status='MAINTENANCE'; return; }
+    item.status = hasOverdue ? 'OVERDUE' : (borrowed > 0 ? 'BORROWED' : 'AVAILABLE');
+}
+function eqSyncAllStatuses(){
+    equipment.forEach(function(item){ eqNormalizeItemState(item); });
 }
 function sameUnit(a, b){
     return String(a||'').trim().toLowerCase() === String(b||'').trim().toLowerCase();
@@ -5795,6 +5806,7 @@ function checkOverdueEquipment(){
             }
         }
     });
+    eqSyncAllStatuses();
     if(changed){ saveEquipData(); }
     return changed;
 }
@@ -5855,7 +5867,7 @@ async function saveEquipmentItem(){
             toast('⛔ Quantity cannot be reduced below the ' + borrowedQty + ' unit(s) currently borrowed.','red',5000); return;
         }
         ex.name = name; ex.category = cat || ex.category || 'General'; ex.unit = unit; ex.condition = cond; ex.qty = qty;
-        eqNormalizeItemState(ex);
+        if(cond === 'Damaged') ex.status='DAMAGED'; else if(cond === 'For Maintenance') ex.status='MAINTENANCE'; else eqNormalizeItemState(ex);
         toast('✅ Equipment updated: ' + ex.id + ' • Qty ' + qty, 'green');
         eqAudit('EQUIPMENT_UPDATE', ex.id + ' - ' + name + ' @ ' + unit + ' | qty=' + qty);
     } else {
@@ -5867,7 +5879,6 @@ async function saveEquipmentItem(){
         eqAudit('EQUIPMENT_ADD', id + ' - ' + name + ' @ ' + unit + ' | qty=' + qty);
     }
     saveEquipData();
-    if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ return window.QLogCentral.syncDatasetsNow(['equipment','equipLogs','auditLogs']); }
     document.getElementById('eqNewId').value = '';
     document.getElementById('eqNewName').value = '';
     document.getElementById('eqNewCategory').value = '';
@@ -6056,19 +6067,15 @@ async function saveEquipmentInline(id){
         it.category = category || it.category || 'General';
         it.condition = condition;
         it.qty = qty;
-        eqNormalizeItemState(it);
+        if(condition === 'Damaged'){ it.status = 'DAMAGED'; }
+        else if(condition === 'For Maintenance'){ it.status = 'MAINTENANCE'; }
+        else { eqNormalizeItemState(it); }
 
         saveEquipData();
-        if(window.QLogCentral && typeof window.QLogCentral.syncDatasetsNow === 'function'){
-            await window.QLogCentral.syncDatasetsNow(['equipment','equipLogs','auditLogs']);
-        } else if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){
-            window.QLogCentral.syncDatasets(['equipment','equipLogs','auditLogs']);
-        }
-
         editingEquipmentId = null;
         refreshEquipmentUI();
-        eqAudit('EQUIPMENT_UPDATE_INLINE', it.id + ' - ' + it.name + ' @ ' + it.unit + ' | qty=' + qty);
-        toast('✅ Equipment updated: ' + it.id + ' • Qty ' + qty + ' • Central synchronized.','green',3200);
+        eqAudit('EQUIPMENT_UPDATE_INLINE', it.id + ' - ' + it.name + ' @ ' + it.unit + ' | qty=' + qty + ' | condition=' + condition);
+        toast('✅ Equipment updated: ' + it.id + ' • Qty ' + qty + ' • Central sync queued.','green',3200);
     }catch(e){
         toast('⛔ Equipment update was not saved — Central verification failed.','red',4500);
     }
@@ -6489,7 +6496,6 @@ function processEquipScan(code){
 
 function applyBorrowerScan(person){
     document.getElementById('eqBorrowerScan').value = person.id;
-    stagedEquipmentTransaction.borrowerId = person.id; persistEquipmentStaging();
     var extra = [person.category, person.grade, person.section].filter(function(v){ return !!v; }).join(' • ');
     document.getElementById('eqBorrowerInfo').innerHTML = '✅ <b>' + eqEsc(person.name) + '</b>' + (extra ? ' — ' + eqEsc(extra) : '');
     document.getElementById('eqBorrowMsg').textContent = '';
@@ -6497,7 +6503,6 @@ function applyBorrowerScan(person){
 }
 function applyEquipmentScan(item){
     document.getElementById('eqItemScan').value = item.id;
-    stagedEquipmentTransaction.equipmentId = item.id; persistEquipmentStaging();
     var sel = document.getElementById('eqItemSelect');
     if(sel) sel.value = item.id;
     var msg = '';
@@ -6515,7 +6520,7 @@ function applyEquipmentScan(item){
 }
 function selectEquipmentFromList(){
     var v = document.getElementById('eqItemSelect').value;
-    if(!v){ document.getElementById('eqItemScan').value = ''; stagedEquipmentTransaction.equipmentId=''; persistEquipmentStaging(); document.getElementById('eqItemInfo').textContent = 'No equipment selected yet.'; return; }
+    if(!v){ document.getElementById('eqItemScan').value = ''; document.getElementById('eqItemInfo').textContent = 'No equipment selected yet.'; return; }
     var it = findEquipment(v); if(it) applyEquipmentScan(it);
 }
 function clearEquipStaging(){
@@ -6528,8 +6533,6 @@ function clearEquipStaging(){
     if(document.getElementById('eqBorrowQty')) document.getElementById('eqBorrowQty').value = '1';
     document.getElementById('eqBorrowMsg').textContent = '';
     equipDup = {};
-    stagedEquipmentTransaction = { borrowerId:'', equipmentId:'', borrowQty:1 };
-    try{ localStorage.removeItem('qlog_eq_staging'); }catch(e){}
 }
 
 /* ---------- Borrow ---------- */
@@ -6538,11 +6541,8 @@ function recordEquipmentBorrow(){
     var fail = function(t){ msgEl.style.color = '#dc2626'; msgEl.textContent = t; toast(t, 'red'); };
     if(!canAccessEquipmentModule()){ fail('⛔ Your unit is not authorized to use Equipment Borrowing.'); return; }
 
-    var bid = document.getElementById('eqBorrowerScan').value.trim() || stagedEquipmentTransaction.borrowerId;
-    if(bid) stagedEquipmentTransaction.borrowerId=bid;
-    stagedEquipmentTransaction.borrowQty = Math.max(1, parseInt((document.getElementById('eqBorrowQty')||{}).value || stagedEquipmentTransaction.borrowQty || '1',10)||1); persistEquipmentStaging();
-    var eid = document.getElementById('eqItemScan').value.trim() || document.getElementById('eqItemSelect').value || stagedEquipmentTransaction.equipmentId;
-    if(eid) stagedEquipmentTransaction.equipmentId=eid;
+    var bid = document.getElementById('eqBorrowerScan').value.trim();
+    var eid = document.getElementById('eqItemScan').value.trim() || document.getElementById('eqItemSelect').value;
     var requestedQty = Math.max(1, parseInt((document.getElementById('eqBorrowQty')||{}).value || '1', 10) || 1);
     if(!bid){ fail('⛔ Scan the borrower QR first. Unregistered borrowers are not allowed.'); return; }
     var person = findPerson(bid);
@@ -6658,16 +6658,13 @@ function renderEquipDashboard(){
 function renderEquipSelect(){
     var sel = document.getElementById('eqItemSelect');
     if(!sel) return;
-    var cur = sel.value || stagedEquipmentTransaction.equipmentId;
+    var cur = sel.value;
     var html = '<option value="">-- Select available equipment --</option>';
     equipment.filter(function(e){ return sameUnit(e.unit, currentSession.facility) && eqAvailableQty(e) > 0; })
         .sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); })
         .forEach(function(e){ html += '<option value="' + eqEsc(e.id) + '">' + eqEsc(e.name) + ' (' + eqEsc(e.id) + ') • ' + eqAvailableQty(e) + '/' + eqQty(e) + ' available</option>'; });
     sel.innerHTML = html;
-    if(cur && findEquipment(cur) && eqAvailableQty(findEquipment(cur)) > 0) { sel.value = cur; document.getElementById('eqItemScan').value = cur; }
-    if(stagedEquipmentTransaction.borrowerId){ document.getElementById('eqBorrowerScan').value = stagedEquipmentTransaction.borrowerId; var p=findPerson(stagedEquipmentTransaction.borrowerId); if(p) applyBorrowerScan(p); }
-    if(stagedEquipmentTransaction.equipmentId){ var si=findEquipment(stagedEquipmentTransaction.equipmentId); if(si && eqAvailableQty(si)>0) applyEquipmentScan(si); }
-    if(document.getElementById('eqBorrowQty')) document.getElementById('eqBorrowQty').value = String(stagedEquipmentTransaction.borrowQty||1);
+    if(cur && findEquipment(cur) && findEquipment(cur).status === 'AVAILABLE') sel.value = cur;
 }
 function renderEquipActive(){
     var rows = equipLogs.filter(function(l){
