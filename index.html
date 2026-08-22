@@ -1380,6 +1380,10 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
         </div>
     </div>
     <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:12px;">
+        <div style="flex:0 0 120px; min-width:110px;">
+            <label style="font-size:13px; font-weight:600;">Borrow Qty</label>
+            <input id="eqBorrowQty" type="number" min="1" step="1" value="1" inputmode="numeric" style="width:100%;">
+        </div>
         <div style="flex:1; min-width:170px;">
             <label style="font-size:13px; font-weight:600;">Expected Return</label>
             <input type="datetime-local" id="eqExpectedReturn" style="width:100%;">
@@ -1409,7 +1413,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <h4 style="margin-top:0;">📌 Active Equipment Borrowings</h4>
     <div class="full-table">
         <table>
-            <thead><tr><th>Ref</th><th>Equipment</th><th>Equipment ID</th><th>Borrower</th><th>Borrower ID</th><th>Unit</th><th>Borrowed</th><th>Expected Return</th><th>Status</th><th>Overdue Days</th><th>Action</th></tr></thead>
+            <thead><tr><th>Ref</th><th>Equipment</th><th>Equipment ID</th><th>Qty</th><th>Borrower</th><th>Borrower ID</th><th>Unit</th><th>Borrowed</th><th>Expected Return</th><th>Status</th><th>Overdue Days</th><th>Action</th></tr></thead>
             <tbody id="eqActiveTbl"></tbody>
         </table>
     </div>
@@ -1437,7 +1441,7 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     </div>
     <div class="full-table" style="margin-top:12px;">
         <table>
-            <thead><tr><th>Ref</th><th>Equipment</th><th>Equipment ID</th><th>Unit</th><th>Borrower</th><th>Borrower ID</th><th>Status</th><th>Borrowed</th><th>Expected</th><th>Returned</th><th>Overdue Days</th><th>Condition Out</th><th>Condition In</th><th>Remarks</th><th>Released By</th></tr></thead>
+            <thead><tr><th>Ref</th><th>Equipment</th><th>Equipment ID</th><th>Qty</th><th>Unit</th><th>Borrower</th><th>Borrower ID</th><th>Status</th><th>Borrowed</th><th>Expected</th><th>Returned</th><th>Overdue Days</th><th>Condition Out</th><th>Condition In</th><th>Remarks</th><th>Released By</th></tr></thead>
             <tbody id="eqLogsTbl"></tbody>
         </table>
     </div>
@@ -1456,6 +1460,9 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
             <div style="flex:1; min-width:150px;"><label style="font-size:13px;font-weight:600;">Equipment Name</label><input id="eqNewName" placeholder="e.g. Compound Microscope"></div>
             <div style="flex:1; min-width:130px;"><label style="font-size:13px;font-weight:600;">Category</label><input id="eqNewCategory" list="eqCategoryList" placeholder="e.g. Laboratory Apparatus"><datalist id="eqCategoryList"></datalist></div>
             <div style="flex:1; min-width:150px;"><label style="font-size:13px;font-weight:600;">Assigned Unit</label><input id="eqNewUnit" list="eqUnitList" placeholder="e.g. Science Laboratory"><datalist id="eqUnitList"></datalist></div>
+            <div style="flex:1; min-width:110px;"><label style="font-size:13px;font-weight:600;">Qty</label>
+                <input id="eqNewQty" type="number" min="1" step="1" value="1" inputmode="numeric" placeholder="1">
+            </div>
             <div style="flex:1; min-width:120px;"><label style="font-size:13px;font-weight:600;">Condition</label>
                 <select id="eqNewCondition"><option value="Good">Good</option><option value="Fair">Fair</option><option value="With Minor Defect">With Minor Defect</option></select>
             </div>
@@ -1481,12 +1488,12 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
             <button style="margin:0; background:#64748b;" onclick="downloadEquipmentTemplate()">⬇ Download Template</button>
             <input type="file" id="eqImportFile" accept=".xlsx,.xls" style="width:auto; margin:0;">
             <button style="margin:0; background:#0ea5e9;" onclick="importEquipmentExcel()">📥 Bulk Import</button>
-            <span style="font-size:12px; color:#64748b;">Required columns: ID, Name, Category, AssignedUnit, Condition</span>
+            <span style="font-size:12px; color:#64748b;">Required: ID, Name, Qty, Category, AssignedUnit, Condition. Qty = total physical units/copies represented by this equipment record.</span>
         </div>
         <div id="eqImportResult" style="margin-top:10px; font-size:13px; font-weight:600;"></div>
         <div class="full-table" style="margin-top:12px;">
             <table>
-                <thead><tr><th>ID</th><th>Name</th><th>Category</th><th>Assigned Unit</th><th>Condition</th><th>Status</th><th>Current Borrower</th><th>QR</th><th>Action</th></tr></thead>
+                <thead><tr><th>ID</th><th>Name</th><th>Category</th><th>Qty</th><th>Available</th><th>Assigned Unit</th><th>Condition</th><th>Status</th><th>Current Borrower</th><th>QR</th><th>Action</th></tr></thead>
                 <tbody id="eqRegistryTbl"></tbody>
             </table>
         </div>
@@ -5748,6 +5755,26 @@ function eqActiveLogFor(eqId){
     var m = equipLogs.filter(function(l){ return l.eqId === eqId && (l.s === 'BORROWED' || l.s === 'OVERDUE'); });
     return m.length ? m[m.length-1] : null;
 }
+function eqQty(item){
+    var q = parseInt(item && item.qty, 10);
+    return Number.isFinite(q) && q > 0 ? q : 1;
+}
+function eqBorrowedQty(eqId){
+    return equipLogs.reduce(function(sum,l){
+        return sum + (l.eqId === eqId && (l.s === 'BORROWED' || l.s === 'OVERDUE') ? Math.max(1,parseInt(l.qty,10)||1) : 0);
+    },0);
+}
+function eqAvailableQty(item){
+    if(!item) return 0;
+    var q=eqQty(item), borrowed=eqBorrowedQty(item.id);
+    if(item.status === 'DAMAGED' || item.status === 'MAINTENANCE') return 0;
+    return Math.max(0,q-borrowed);
+}
+function eqNormalizeItemState(item){
+    if(!item) return;
+    if(item.status === 'DAMAGED' || item.status === 'MAINTENANCE') return;
+    item.status = eqAvailableQty(item) > 0 ? 'AVAILABLE' : 'BORROWED';
+}
 function sameUnit(a, b){
     return String(a||'').trim().toLowerCase() === String(b||'').trim().toLowerCase();
 }
@@ -5764,7 +5791,7 @@ function checkOverdueEquipment(){
             if(l.s !== 'OVERDUE' || l.overdueDays !== days){
                 l.s = 'OVERDUE'; l.overdueDays = days; changed = true;
                 var it = findEquipment(l.eqId);
-                if(it && it.status === 'BORROWED'){ it.status = 'OVERDUE'; }
+                if(it && it.status !== 'DAMAGED' && it.status !== 'MAINTENANCE'){ it.status = 'OVERDUE'; }
             }
         }
     });
@@ -5792,28 +5819,24 @@ async function saveEquipmentItem(){
     var cat  = document.getElementById('eqNewCategory').value.trim();
     var unit = document.getElementById('eqNewUnit').value.trim() || (currentSession.facility || '');
     var cond = document.getElementById('eqNewCondition').value;
+    var qty  = Math.max(1, parseInt(document.getElementById('eqNewQty').value || '1', 10) || 1);
     if(!id || !name){ toast('⚠️ Equipment ID and Name are required.','red'); return; }
     if(!unit){ toast('⚠️ Assigned unit is required.','red'); return; }
 
-    /* Cross-office ownership check BEFORE touching local equipment. */
     try {
         if(window.QLogCentral && typeof window.QLogCentral.checkInventoryBatch === 'function'){
             var check = await window.QLogCentral.checkInventoryBatch('equipment',[{
-                id:id,
-                name:name,
-                category:cat || 'General',
-                unit:unit,
-                condition:cond || 'Good'
+                id:id, name:name, category:cat || 'General', unit:unit, qty:qty, condition:cond || 'Good'
             }]);
             var conflict = check && check.conflicts && check.conflicts.length ? check.conflicts[0] : null;
             if(conflict && conflict.reason === 'ALREADY_ASSIGNED_TO_OTHER_PROFILE'){
                 var owner = conflict.existingFacility || 'another office/laboratory';
                 var person = conflict.existingInCharge ? ' under ' + conflict.existingInCharge : '';
-                toast('⛔ Already added in ' + owner + person + '. This equipment cannot be added here.','red',5000);
+                toast('⛔ Already registered in ' + owner + person + '. It remains owned by that unit; nothing was added here.','red',5000);
                 return;
             }
             if(conflict && conflict.reason === 'DUPLICATE_IN_IMPORT'){
-                toast('⛔ This equipment is already present in the current Central inventory.','red',5000);
+                toast('⛔ This equipment identity is already present in the Central inventory.','red',5000);
                 return;
             }
         }
@@ -5827,24 +5850,29 @@ async function saveEquipmentItem(){
         if(!sameUnit(ex.unit, currentSession.facility)){
             toast('⛔ ' + ex.id + ' is assigned to ' + ex.unit + '. Only that unit can update it.','red'); return;
         }
-        ex.name = name; ex.category = cat || ex.category; ex.unit = unit; ex.condition = cond;
-        toast('✅ Equipment updated: ' + ex.id, 'green');
-        eqAudit('EQUIPMENT_UPDATE', ex.id + ' - ' + name);
+        var borrowedQty = eqBorrowedQty(ex.id);
+        if(qty < borrowedQty){
+            toast('⛔ Quantity cannot be reduced below the ' + borrowedQty + ' unit(s) currently borrowed.','red',5000); return;
+        }
+        ex.name = name; ex.category = cat || ex.category || 'General'; ex.unit = unit; ex.condition = cond; ex.qty = qty;
+        eqNormalizeItemState(ex);
+        toast('✅ Equipment updated: ' + ex.id + ' • Qty ' + qty, 'green');
+        eqAudit('EQUIPMENT_UPDATE', ex.id + ' - ' + name + ' @ ' + unit + ' | qty=' + qty);
     } else {
         equipment.push({
             id: id, name: name, category: cat || 'General', unit: unit, condition: cond,
-            status: 'AVAILABLE', addedAt: Date.now(), addedBy: currentSession.inCharge || '', remarks: ''
+            qty: qty, status: 'AVAILABLE', addedAt: Date.now(), addedBy: currentSession.inCharge || '', remarks: ''
         });
-        toast('✅ Equipment registered: ' + id, 'green');
-        eqAudit('EQUIPMENT_ADD', id + ' - ' + name + ' @ ' + unit);
+        toast('✅ Equipment registered: ' + id + ' • Qty ' + qty, 'green');
+        eqAudit('EQUIPMENT_ADD', id + ' - ' + name + ' @ ' + unit + ' | qty=' + qty);
     }
     saveEquipData();
     document.getElementById('eqNewId').value = '';
     document.getElementById('eqNewName').value = '';
     document.getElementById('eqNewCategory').value = '';
+    document.getElementById('eqNewQty').value = '1';
     refreshEquipmentUI();
 }
-
 function editEquipmentItem(id){
     var it = findEquipment(id); if(!it) return;
     document.getElementById('eqNewId').value = it.id;
@@ -5852,6 +5880,7 @@ function editEquipmentItem(id){
     document.getElementById('eqNewCategory').value = it.category || '';
     document.getElementById('eqNewUnit').value = it.unit || '';
     document.getElementById('eqNewCondition').value = it.condition || 'Good';
+    document.getElementById('eqNewQty').value = eqQty(it);
     toast('✏️ Loaded ' + it.id + ' for editing.','yellow');
 }
 function deleteEquipmentItem(id){
@@ -5901,6 +5930,7 @@ function renderEquipRegistry(){
     var html = '';
     list.forEach(function(e){
         var act = eqActiveLogFor(e.id);
+        var qty = eqQty(e), availableQty = eqAvailableQty(e);
         var mine = sameUnit(e.unit, currentSession.facility);
         var actions = '';
         if(mine){
@@ -5912,19 +5942,19 @@ function renderEquipRegistry(){
                 actions += '<button style="background:#dc2626;padding:4px 8px;font-size:12px;" onclick="deleteEquipmentItem(\'' + eqEsc(e.id) + '\')">Delete</button>';
             }
         } else { actions = '<span style="font-size:12px;color:#94a3b8;">Other unit</span>'; }
-        html += '<tr><td>' + eqEsc(e.id) + '</td><td>' + eqEsc(e.name) + '</td><td>' + eqEsc(e.category||'') + '</td><td>' + eqEsc(e.unit) + '</td><td>' + eqEsc(e.condition||'') + '</td><td>' + eqStatusBadge(e.status) + '</td><td>' + (act ? eqEsc(act.borrowerName) + '<br><span style="font-size:11px;color:#64748b;">' + eqEsc(act.borrowerId) + '</span>' : '--') + '</td>' +
+        html += '<tr><td>' + eqEsc(e.id) + '</td><td>' + eqEsc(e.name) + '</td><td>' + eqEsc(e.category||'') + '</td><td>' + qty + '</td><td>' + availableQty + '</td><td>' + eqEsc(e.unit) + '</td><td>' + eqEsc(e.condition||'') + '</td><td>' + eqStatusBadge(e.status) + '</td><td>' + (act ? eqEsc(act.borrowerName) + '<br><span style="font-size:11px;color:#64748b;">' + eqEsc(act.borrowerId) + '</span>' : '--') + '</td>' +
             '<td><button style="background:#0f172a;padding:4px 8px;font-size:12px;" onclick="showEquipmentQr(\'' + eqEsc(e.id) + '\')">QR</button> ' +
             '<button style="background:#7c3aed;padding:4px 8px;font-size:12px;" onclick="openEquipmentHistory(\'' + eqEsc(e.id) + '\')">History</button></td>' +
             '<td>' + actions + '</td></tr>';
     });
-    document.getElementById('eqRegistryTbl').innerHTML = html || '<tr><td colspan="9">No equipment registered yet. Add items using the form above.</td></tr>';
+    document.getElementById('eqRegistryTbl').innerHTML = html || '<tr><td colspan="11">No equipment registered yet. Add items using the form above.</td></tr>';
 }
 
 function exportEquipRegistry(){
     if(equipment.length === 0){ alert('No equipment registered yet.'); return; }
     if(typeof XLSX === 'undefined') return;
     var rows = equipment.map(function(e){
-        return { ID:e.id, Name:e.name, Category:e.category||'', AssignedUnit:e.unit, Condition:e.condition||'', Status:e.status, RegisteredBy:e.addedBy||'', RegisteredOn:eqFmt(e.addedAt) };
+        return { ID:e.id, Name:e.name, Category:e.category||'', Qty:eqQty(e), AvailableQty:eqAvailableQty(e), AssignedUnit:e.unit, Condition:e.condition||'', Status:e.status, RegisteredBy:e.addedBy||'', RegisteredOn:eqFmt(e.addedAt) };
     });
     var ws = XLSX.utils.json_to_sheet(rows);
     if(typeof addSignatureToExcel === 'function') addSignatureToExcel(ws);
@@ -5944,13 +5974,14 @@ function downloadEquipmentTemplate(){
             ID: 'SCI-MICRO-001',
             Name: 'Compound Microscope',
             Category: 'Laboratory Apparatus',
+            Qty: 1,
             AssignedUnit: (currentSession && currentSession.facility) ? currentSession.facility : 'Science Laboratory',
             Condition: 'Good',
             Status: 'AVAILABLE',
             Remarks: 'Sample row - replace with real equipment'
         }
     ];
-    var ws = XLSX.utils.json_to_sheet(rows, { header: ['ID','Name','Category','AssignedUnit','Condition','Status','Remarks'] });
+    var ws = XLSX.utils.json_to_sheet(rows, { header: ['ID','Name','Qty','Category','AssignedUnit','Condition','Status','Remarks'] });
     ws['!cols'] = [{wch:18},{wch:32},{wch:24},{wch:26},{wch:18},{wch:14},{wch:40}];
     var wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Equipment Registry');
@@ -6000,6 +6031,8 @@ async function importEquipmentExcel(){
                 var unit   = _eqPick(row, ['assignedunit','unit','office','facility','department']);
                 var cond   = _eqPick(row, ['condition','itemcondition']);
                 var status = _eqPick(row, ['status','state']).toUpperCase();
+                var qtyRaw = _eqPick(row, ['qty','quantity','copies','copycount','stock','count']);
+                var qty = Math.max(1, parseInt(qtyRaw || '1', 10) || 1);
                 var remarks= _eqPick(row, ['remarks','notes','note']);
 
                 if(!id || !name){
@@ -6023,6 +6056,7 @@ async function importEquipmentExcel(){
                     unit:unit,
                     condition:cond || 'Good',
                     status:status,
+                    qty:qty,
                     remarks:remarks || ''
                 });
             });
@@ -6051,7 +6085,7 @@ async function importEquipmentExcel(){
             }
 
             candidates.forEach(function(item){
-                var id=item.id, name=item.name, cat=item.category, unit=item.unit, cond=item.condition, status=item.status, remarks=item.remarks;
+                var id=item.id, name=item.name, cat=item.category, unit=item.unit, cond=item.condition, status=item.status, qty=item.qty, remarks=item.remarks;
                 var ex = findEquipment(id);
                 if(ex){
                     if(!sameUnit(ex.unit, currentSession.facility)){
@@ -6065,6 +6099,14 @@ async function importEquipmentExcel(){
                     ex.category  = cat || ex.category || 'General';
                     ex.unit      = unit;
                     ex.condition = cond || ex.condition || 'Good';
+                    var borrowedQty = eqBorrowedQty(ex.id);
+                    if(qty < borrowedQty){
+                        skipped++;
+                        problems.push(id + ': cannot reduce qty below currently borrowed quantity (' + borrowedQty + ').');
+                        return;
+                    }
+                    ex.qty = qty;
+                    eqNormalizeItemState(ex);
                     if(remarks) ex.remarks = remarks;
                     if(!act && status) ex.status = status;
                     updated++;
@@ -6074,6 +6116,7 @@ async function importEquipmentExcel(){
                         name: name,
                         category: cat || 'General',
                         unit: unit,
+                        qty: qty,
                         condition: cond || 'Good',
                         status: status || 'AVAILABLE',
                         addedAt: Date.now(),
@@ -6339,7 +6382,7 @@ function applyEquipmentScan(item){
         msg = '⚠️ <b>' + eqEsc(item.name) + '</b> is currently <b>' + eqEsc(item.status) + '</b> and cannot be borrowed.';
         toast('⚠️ Equipment is ' + item.status, 'yellow');
     } else {
-        msg = '✅ <b>' + eqEsc(item.name) + '</b> — ' + eqEsc(item.category||'') + ' • ' + eqEsc(item.unit) + ' • Condition: ' + eqEsc(item.condition||'Good');
+        msg = '✅ <b>' + eqEsc(item.name) + '</b> — ' + eqEsc(item.category||'') + ' • ' + eqEsc(item.unit) + ' • Available: <b>' + eqAvailableQty(item) + '</b> / ' + eqQty(item) + ' • Condition: ' + eqEsc(item.condition||'Good');
         toast('🧰 Equipment verified: ' + item.name, 'green');
     }
     document.getElementById('eqItemInfo').innerHTML = msg;
@@ -6356,6 +6399,7 @@ function clearEquipStaging(){
     document.getElementById('eqBorrowerInfo').textContent = 'No borrower scanned yet.';
     document.getElementById('eqItemInfo').textContent = 'No equipment selected yet.';
     document.getElementById('eqPurpose').value = '';
+    if(document.getElementById('eqBorrowQty')) document.getElementById('eqBorrowQty').value = '1';
     document.getElementById('eqBorrowMsg').textContent = '';
     equipDup = {};
 }
@@ -6368,6 +6412,7 @@ function recordEquipmentBorrow(){
 
     var bid = document.getElementById('eqBorrowerScan').value.trim();
     var eid = document.getElementById('eqItemScan').value.trim() || document.getElementById('eqItemSelect').value;
+    var requestedQty = Math.max(1, parseInt((document.getElementById('eqBorrowQty')||{}).value || '1', 10) || 1);
     if(!bid){ fail('⛔ Scan the borrower QR first. Unregistered borrowers are not allowed.'); return; }
     var person = findPerson(bid);
     if(!person){ fail('⛔ Borrower is not registered in the client database.'); return; }
@@ -6375,8 +6420,9 @@ function recordEquipmentBorrow(){
     var item = findEquipment(eid);
     if(!item){ fail('⛔ Equipment is not registered in the equipment registry.'); return; }
     if(!sameUnit(item.unit, currentSession.facility)){ fail('⛔ ' + item.id + ' is assigned to ' + item.unit + '. Your unit cannot release it.'); return; }
-    if(eqActiveLogFor(item.id)){ fail('⛔ Duplicate borrowing blocked — ' + item.id + ' is already borrowed and not yet returned.'); return; }
-    if(item.status !== 'AVAILABLE'){ fail('⛔ ' + item.id + ' is currently ' + item.status + ' and is not available for borrowing.'); return; }
+    var availableQty = eqAvailableQty(item);
+    if(availableQty < requestedQty){ fail('⛔ Only ' + availableQty + ' unit(s) are available for ' + item.id + '.'); return; }
+    if(item.status === 'DAMAGED' || item.status === 'MAINTENANCE'){ fail('⛔ ' + item.id + ' is currently ' + item.status + ' and is not available for borrowing.'); return; }
 
     var expVal = document.getElementById('eqExpectedReturn').value;
     var expMs = eqDateInputToMs(expVal);
@@ -6388,6 +6434,7 @@ function recordEquipmentBorrow(){
     equipLogs.push({
         ref: ref,
         eqId: item.id, eqName: item.name, eqCategory: item.category || '', unit: item.unit,
+        qty: requestedQty,
         borrowerId: person.id, borrowerName: person.name,
         borrowerCategory: person.category || '', borrowerGrade: person.grade || '', borrowerSection: person.section || '',
         s: 'BORROWED',
@@ -6402,23 +6449,22 @@ function recordEquipmentBorrow(){
         releasedByDesignation: currentSession.designation || '',
         receivedBy: ''
     });
-    item.status = 'BORROWED';
+    eqNormalizeItemState(item);
     saveEquipData();
-    eqAudit('EQUIPMENT_BORROW', ref + ' | ' + item.id + ' -> ' + person.name);
+    eqAudit('EQUIPMENT_BORROW', ref + ' | ' + item.id + ' x' + requestedQty + ' -> ' + person.name);
     clearEquipStaging();
     msgEl.style.color = '#16a34a';
-    msgEl.textContent = '✅ ' + item.name + ' released to ' + person.name + '. Expected return: ' + eqFmt(expMs) + ' (Ref ' + ref + ')';
-    toast('✅ Equipment borrowing recorded.', 'green');
+    msgEl.textContent = '✅ ' + requestedQty + ' unit(s) of ' + item.name + ' released to ' + person.name + '. Expected return: ' + eqFmt(expMs) + ' (Ref ' + ref + ')';
+    toast('✅ Equipment borrowing recorded • Qty ' + requestedQty, 'green');
     refreshEquipmentUI();
 }
-
 /* ---------- Return ---------- */
 function openEquipReturnModal(ref){
     var log = equipLogs.filter(function(l){ return l.ref === ref; })[0];
     if(!log) return;
     _eqPendingReturnRef = ref;
     document.getElementById('eqReturnSummary').innerHTML =
-        '<b>' + eqEsc(log.eqName) + '</b> (' + eqEsc(log.eqId) + ')<br>' +
+        '<b>' + eqEsc(log.eqName) + '</b> (' + eqEsc(log.eqId) + ') • Qty: <b>' + (log.qty || 1) + '</b><br>' +
         'Borrower: ' + eqEsc(log.borrowerName) + ' (' + eqEsc(log.borrowerId) + ')<br>' +
         'Borrowed: ' + eqEsc(log.borrowedAt) + '<br>' +
         'Expected: ' + eqEsc(log.expectedAt) + (log.s === 'OVERDUE' ? ' <span style="color:#dc2626;font-weight:700;">(OVERDUE ' + log.overdueDays + ' day/s)</span>' : '');
@@ -6450,8 +6496,10 @@ function submitEquipmentReturn(){
 
     var item = findEquipment(log.eqId);
     if(item){
-        item.status = (cond === 'Damaged') ? 'DAMAGED' : (cond === 'For Maintenance' ? 'MAINTENANCE' : 'AVAILABLE');
         item.condition = (cond === 'Damaged') ? 'Damaged' : (cond === 'For Maintenance' ? 'For Maintenance' : cond);
+        if(cond === 'Damaged') item.status = 'DAMAGED';
+        else if(cond === 'For Maintenance') item.status = 'MAINTENANCE';
+        else eqNormalizeItemState(item);
     }
     saveEquipData();
     eqAudit('EQUIPMENT_RETURN', log.ref + ' | ' + log.eqId + ' | ' + log.s);
@@ -6463,14 +6511,14 @@ function submitEquipmentReturn(){
 /* ---------- Rendering ---------- */
 function renderEquipDashboard(){
     var mine = equipment.filter(function(e){ return sameUnit(e.unit, currentSession.facility); });
-    var avail = 0, borrowed = 0, overdue = 0, out = 0;
+    var total = 0, avail = 0, borrowed = 0, overdue = 0, out = 0;
     mine.forEach(function(e){
-        if(e.status === 'AVAILABLE') avail++;
-        else if(e.status === 'BORROWED') borrowed++;
-        else if(e.status === 'OVERDUE'){ borrowed++; overdue++; }
-        else out++;
+        var q = eqQty(e), b = eqBorrowedQty(e.id), a = eqAvailableQty(e);
+        total += q; avail += a; borrowed += b;
+        if(e.status === 'OVERDUE') overdue += b;
+        else if(e.status === 'DAMAGED' || e.status === 'MAINTENANCE') out += q;
     });
-    document.getElementById('eqDashTotal').textContent = mine.length;
+    document.getElementById('eqDashTotal').textContent = total;
     document.getElementById('eqDashAvailable').textContent = avail;
     document.getElementById('eqDashBorrowed').textContent = borrowed;
     document.getElementById('eqDashOverdue').textContent = overdue;
@@ -6481,9 +6529,9 @@ function renderEquipSelect(){
     if(!sel) return;
     var cur = sel.value;
     var html = '<option value="">-- Select available equipment --</option>';
-    equipment.filter(function(e){ return sameUnit(e.unit, currentSession.facility) && e.status === 'AVAILABLE'; })
+    equipment.filter(function(e){ return sameUnit(e.unit, currentSession.facility) && eqAvailableQty(e) > 0; })
         .sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); })
-        .forEach(function(e){ html += '<option value="' + eqEsc(e.id) + '">' + eqEsc(e.name) + ' (' + eqEsc(e.id) + ')</option>'; });
+        .forEach(function(e){ html += '<option value="' + eqEsc(e.id) + '">' + eqEsc(e.name) + ' (' + eqEsc(e.id) + ') • ' + eqAvailableQty(e) + '/' + eqQty(e) + ' available</option>'; });
     sel.innerHTML = html;
     if(cur && findEquipment(cur) && findEquipment(cur).status === 'AVAILABLE') sel.value = cur;
 }
@@ -6493,11 +6541,11 @@ function renderEquipActive(){
     }).sort(function(a,b){ return a.expectedMs - b.expectedMs; });
     var html = '';
     rows.forEach(function(l){
-        html += '<tr><td>' + eqEsc(l.ref) + '</td><td>' + eqEsc(l.eqName) + '</td><td>' + eqEsc(l.eqId) + '</td><td>' + eqEsc(l.borrowerName) + '</td><td>' + eqEsc(l.borrowerId) + '</td><td>' + eqEsc(l.unit) + '</td><td>' + eqEsc(l.borrowedAt) + '</td><td>' + eqEsc(l.expectedAt) + '</td><td>' + eqStatusBadge(l.s) + '</td><td>' + (l.overdueDays || 0) + '</td>' +
+        html += '<tr><td>' + eqEsc(l.ref) + '</td><td>' + eqEsc(l.eqName) + '</td><td>' + eqEsc(l.eqId) + '</td><td>' + (l.qty || 1) + '</td><td>' + eqEsc(l.borrowerName) + '</td><td>' + eqEsc(l.borrowerId) + '</td><td>' + eqEsc(l.unit) + '</td><td>' + eqEsc(l.borrowedAt) + '</td><td>' + eqEsc(l.expectedAt) + '</td><td>' + eqStatusBadge(l.s) + '</td><td>' + (l.overdueDays || 0) + '</td>' +
             '<td><button style="background:#16a34a;padding:5px 10px;font-size:12px;" onclick="openEquipReturnModal(\'' + eqEsc(l.ref) + '\')">Return</button> ' +
             '<button style="background:#7c3aed;padding:5px 10px;font-size:12px;" onclick="openEquipmentHistory(\'' + eqEsc(l.eqId) + '\')">History</button></td></tr>';
     });
-    document.getElementById('eqActiveTbl').innerHTML = html || '<tr><td colspan="11">No active equipment borrowings.</td></tr>';
+    document.getElementById('eqActiveTbl').innerHTML = html || '<tr><td colspan="12">No active equipment borrowings.</td></tr>';
 }
 function eqFilteredLogs(){
     var st = (document.getElementById('eqFilterStatus') || {}).value || 'ALL';
@@ -6523,9 +6571,9 @@ function renderEquipLogs(){
     var rows = eqFilteredLogs();
     var html = '';
     rows.forEach(function(l){
-        html += '<tr><td>' + eqEsc(l.ref) + '</td><td>' + eqEsc(l.eqName) + '</td><td>' + eqEsc(l.eqId) + '</td><td>' + eqEsc(l.unit) + '</td><td>' + eqEsc(l.borrowerName) + '</td><td>' + eqEsc(l.borrowerId) + '</td><td>' + eqStatusBadge(l.s) + '</td><td>' + eqEsc(l.borrowedAt) + '</td><td>' + eqEsc(l.expectedAt) + '</td><td>' + eqEsc(l.returnedAt || '--') + '</td><td>' + (l.overdueDays || 0) + '</td><td>' + eqEsc(l.conditionOut || '') + '</td><td>' + eqEsc(l.conditionIn || '--') + '</td><td>' + eqEsc(l.remarks || '') + '</td><td>' + eqEsc(l.releasedBy || '') + '</td></tr>';
+        html += '<tr><td>' + eqEsc(l.ref) + '</td><td>' + eqEsc(l.eqName) + '</td><td>' + eqEsc(l.eqId) + '</td><td>' + (l.qty || 1) + '</td><td>' + eqEsc(l.unit) + '</td><td>' + eqEsc(l.borrowerName) + '</td><td>' + eqEsc(l.borrowerId) + '</td><td>' + eqStatusBadge(l.s) + '</td><td>' + eqEsc(l.borrowedAt) + '</td><td>' + eqEsc(l.expectedAt) + '</td><td>' + eqEsc(l.returnedAt || '--') + '</td><td>' + (l.overdueDays || 0) + '</td><td>' + eqEsc(l.conditionOut || '') + '</td><td>' + eqEsc(l.conditionIn || '--') + '</td><td>' + eqEsc(l.remarks || '') + '</td><td>' + eqEsc(l.releasedBy || '') + '</td></tr>';
     });
-    document.getElementById('eqLogsTbl').innerHTML = html || '<tr><td colspan="15">No equipment transactions found for the current filters.</td></tr>';
+    document.getElementById('eqLogsTbl').innerHTML = html || '<tr><td colspan="16">No equipment transactions found for the current filters.</td></tr>';
 }
 function clearEquipFilters(){
     document.getElementById('eqFilterStatus').value = 'ALL';
