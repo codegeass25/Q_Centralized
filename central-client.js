@@ -114,8 +114,12 @@
 
   function localInventoryFingerprint(o,name){
     o=o||{}; function n(v){return String(v==null?'':v).trim().toLowerCase();}
-    if(name==='books') return [n(o.isbn||o.ISBN),n(o.title||o.bookTitle||o.name),n(o.author),n(o.accessionNo||o.accession)].join('|');
-    return [n(o.assetNo||o.asset),n(o.name||o.eqName||o.title),n(o.serialNo||o.serial),n(o.type||''),n(o.unit||o.facility||'')].join('|');
+    if(name==='books'){
+      var bid=n(o.id||o.bookId||o.bookID||o.productId||o.productID||o.inventoryId||o.itemId||o.itemID||o.accessionNo||o.accession||o.barcode||o.barCode||o.qrCode||o.isbn||o.ISBN);
+      return bid ? 'book|'+bid : ['book-fallback',n(o.title||o.bookTitle||o.name),n(o.author)].join('|');
+    }
+    var eid=n(o.id||o.equipmentId||o.equipmentID||o.eqId||o.productId||o.productID||o.inventoryId||o.itemId||o.itemID||o.assetNo||o.asset||o.propertyNo||o.propertyID||o.serialNo||o.serial||o.barcode||o.barCode||o.qrCode||o.code);
+    return eid ? 'equipment|'+eid : ['equipment-fallback',n(o.name||o.eqName||o.title),n(o.category||o.type),n(o.manufacturer),n(o.model)].join('|');
   }
   function dedupeLocal(name,value){
     if((name!=='books'&&name!=='equipment')||!Array.isArray(value))return value;
@@ -237,6 +241,7 @@
     try{if(typeof renderLogs==='function')renderLogs();}catch(e){}
     try{if(typeof renderBookInventory==='function')renderBookInventory();}catch(e){}
     try{if(typeof refreshEquipmentUI==='function')refreshEquipmentUI();}catch(e){}
+    try{if(typeof equipDup!=='undefined')equipDup={};if(typeof _eqPendingReturnRef!=='undefined')_eqPendingReturnRef=null;if(typeof clearEquipStaging==='function')clearEquipStaging();}catch(e){}
     try{if(typeof renderBorrow==='function')renderBorrow();}catch(e){}
   }
 
