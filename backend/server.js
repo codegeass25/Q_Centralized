@@ -155,8 +155,7 @@ function globalIdentityKey(dataset, obj) {
           type: 'books-fallback',
           title: String(o.title || o.bookTitle || o.name || '').trim().toLowerCase(),
           author: String(o.author || '').trim().toLowerCase(),
-          category: String(o.category || '').trim().toLowerCase(),
-          quantity: quantityValue(o)
+          category: String(o.category || '').trim().toLowerCase()
         };
   } else if (dataset === 'equipment') {
     const unique = identityValue(o, [
@@ -170,8 +169,7 @@ function globalIdentityKey(dataset, obj) {
           name: String(o.name || o.eqName || o.title || '').trim().toLowerCase(),
           category: String(o.category || o.type || '').trim().toLowerCase(),
           manufacturer: String(o.manufacturer || '').trim().toLowerCase(),
-          model: String(o.model || '').trim().toLowerCase(),
-          quantity: quantityValue(o)
+          model: String(o.model || '').trim().toLowerCase()
         };
   } else {
     source = stableNormalize(o);
@@ -363,7 +361,15 @@ async function initDb() {
     "ALTER TABLE records ADD COLUMN facility TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE devices ADD COLUMN profile_key TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE records ADD COLUMN profile_key TEXT NOT NULL DEFAULT ''",
-    "ALTER TABLE profile_records ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''"
+    "ALTER TABLE profile_records ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE central_registry ADD COLUMN identity_key TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE central_registry ADD COLUMN content_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE central_registry ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE central_registry ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE central_registry ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE central_registry ADD COLUMN last_profile_key TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE central_registry ADD COLUMN last_facility TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE central_registry ADD COLUMN last_in_charge TEXT NOT NULL DEFAULT ''"
   ]) {
     try { await run(stmt); }
     catch (e) {
@@ -423,6 +429,21 @@ async function initDb() {
 
   /* Always rebuild Central's school-wide canonical registry from profile records. */
   await rebuildGlobalRegistry();
+
+  /*
+   * Only create the unique registry index AFTER the rebuild has cleared
+   * any legacy rows. This is important when an old registry gained a new
+   * identity_key column with a temporary default value.
+   */
+  await exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+      idx_central_registry_identity
+    ON central_registry(dataset, identity_key);
+
+    CREATE INDEX IF NOT EXISTS
+      idx_central_registry_dataset
+    ON central_registry(dataset);
+  `);
 }
 
 async function rebuildGlobalRegistry(){
@@ -973,6 +994,7 @@ app.post('/api/admin/login', async(req,res)=>{
 
 app.get('/api/admin/summary', requireAdmin, async(req,res,next)=>{
   try {
+    await rebuildGlobalRegistry();
     const [devices,profiles,logs,visitors,people,books,borrowLogs,equipment,equipLogs]=await Promise.all([
       get('SELECT COUNT(*) n FROM devices'),
       get("SELECT COUNT(*) n FROM profile_assignments WHERE status='ACTIVE'"),
@@ -996,7 +1018,43 @@ app.get('/api/admin/global', requireAdmin, async(req,res,next)=>{
     if(!GLOBAL_DATASETS.has(dataset)) return res.status(400).json({ok:false,error:'INVALID_GLOBAL_DATASET'});
     const limit=Math.min(Math.max(Number(req.query.limit||5000),1),20000);
     const rows=await all(`SELECT dataset,identity_key,record_json,content_hash,updated_at,revision,occurrences,last_profile_key,last_facility,last_in_charge FROM central_registry WHERE dataset=? ORDER BY updated_at DESC LIMIT ?`,[dataset,limit]);
-    res.json({ok:true,dataset,rows:rows.map(r=>({identityKey:r.identity_key,data:safeJson(r.record_json,{}),contentHash:r.content_hash,updatedAt:r.updated_at,revision:r.revision,occurrences:r.occurrences,lastProfileKey:r.last_profile_key,lastFacility:r.last_facility,lastInCharge:r.last_in_charge}))});
+    const q=String(req.query.q||'').trim().toLowerCase();
+    const date=String(req.query.date||'').trim();
+    let out=rows.map(r=>({identityKey:r.identity_key,data:safeJson(r.record_json,{}),contentHash:r.content_hash,updatedAt:r.updated_at,revision:r.revision,occurrences:r.occurrences,lastProfileKey:r.last_profile_key,lastFacility:r.last_facility,lastInCharge:r.last_in_charge}));
+    if(q) out=out.filter(r=>JSON.stringify(r.data||{}).toLowerCase().includes(q)||String(r.lastFacility||'').toLowerCase().includes(q)||String(r.lastInCharge||'').toLowerCase().includes(q));
+    if(date) out=out.filter(r=>{ const d=(r.data&& (r.data.date||r.data.registeredAt||r.data.addedAt||r.data.createdAt||r.data.borrowedAt)) || r.updatedAt || ''; return String(d).slice(0,10)===date || String(d).includes(date); });
+    res.json({ok:true,dataset,rows:out});
+  }catch(e){next(e);}
+});
+
+app.get('/api/admin/card-records', requireAdmin, async(req,res,next)=>{
+  try{
+    const kind=String(req.query.kind||'').trim();
+    const limit=Math.min(Math.max(Number(req.query.limit||10000),1),20000);
+    const q=String(req.query.q||'').trim().toLowerCase();
+    const date=String(req.query.date||'').trim();
+    let rows=[];
+    if(kind==='devices'){
+      rows=await all(`SELECT source_id,facility,in_charge,designation,role,profile_key,created_at,last_seen_at,data_version FROM devices ORDER BY last_seen_at DESC LIMIT ?`,[limit]);
+      rows=rows.map(r=>({identityKey:r.source_id,data:r,updatedAt:r.last_seen_at,facility:r.facility,inCharge:r.in_charge,occurrences:1}));
+    } else if(kind==='profiles'){
+      rows=await all(`SELECT profile_key,assignment_id,in_charge,facility,designation,role,status,started_at,ended_at,created_at,updated_at,archived_at,replaced_by_profile_key FROM profile_assignments ORDER BY updated_at DESC LIMIT ?`,[limit]);
+      rows=rows.map(r=>({identityKey:r.profile_key,data:r,updatedAt:r.updated_at,facility:r.facility,inCharge:r.in_charge,occurrences:1}));
+    } else if(GLOBAL_DATASETS.has(kind)){
+      await rebuildGlobalRegistry();
+      rows=await all(`SELECT dataset,identity_key,record_json,content_hash,updated_at,revision,occurrences,last_profile_key,last_facility,last_in_charge FROM central_registry WHERE dataset=? ORDER BY updated_at DESC LIMIT ?`,[kind,limit]);
+      rows=rows.map(r=>({identityKey:r.identity_key,data:safeJson(r.record_json,{}),contentHash:r.content_hash,updatedAt:r.updated_at,revision:r.revision,occurrences:r.occurrences,lastProfileKey:r.last_profile_key,lastFacility:r.last_facility,lastInCharge:r.last_in_charge,facility:r.last_facility,inCharge:r.last_in_charge}));
+    } else if(kind==='attendance' || kind==='visitors' || kind==='borrowLogs' || kind==='equipLogs'){
+      const dataset=kind==='attendance'||kind==='visitors'?'logs':kind;
+      const records=await all(`SELECT profile_key,dataset,record_key,record_json,record_date,record_name,updated_at,revision,facility,in_charge FROM profile_records WHERE dataset=? AND deleted_at IS NULL ORDER BY updated_at DESC LIMIT ?`,[dataset,limit]);
+      rows=records.map(r=>({identityKey:r.profile_key+'|'+r.record_key,data:safeJson(r.record_json,{}),updatedAt:r.updated_at,revision:r.revision,facility:r.facility,inCharge:r.in_charge,profileKey:r.profile_key}));
+      if(kind==='visitors') rows=rows.filter(r=>String((r.data||{}).category||'').toUpperCase()==='VISITOR');
+    } else {
+      return res.status(400).json({ok:false,error:'INVALID_CARD_KIND'});
+    }
+    if(q) rows=rows.filter(r=>JSON.stringify(r.data||{}).toLowerCase().includes(q)||String(r.facility||r.lastFacility||'').toLowerCase().includes(q)||String(r.inCharge||r.lastInCharge||'').toLowerCase().includes(q));
+    if(date) rows=rows.filter(r=>{ const d=(r.data&&((r.data.date)||(r.data.registeredAt)||(r.data.addedAt)||(r.data.createdAt)||(r.data.borrowedAt)||(r.data.returnedAt))) || r.updatedAt || ''; return String(d).slice(0,10)===date || String(d).includes(date) || String(d).includes(date.replaceAll('-','/')); });
+    res.json({ok:true,kind,rows});
   }catch(e){next(e);}
 });
 
