@@ -926,6 +926,32 @@ async function rebuildHandler(req,res,next){
 app.get('/api/profile/rebuild', requireDevice, rebuildHandler);
 app.post('/api/profile/rebuild', requireDevice, rebuildHandler);
 
+app.get('/api/visitors/lookup', requireDevice, async(req,res,next)=>{
+  try {
+    const qr=String(req.query.qr||'').trim();
+    if(!qr) return res.status(400).json({ok:false,error:'VISITOR_QR_REQUIRED'});
+    let rows=await all(`SELECT profile_key,record_key,record_json,updated_at,revision,facility,in_charge
+                        FROM profile_records
+                        WHERE dataset='logs' AND deleted_at IS NULL AND record_key=?
+                        ORDER BY updated_at DESC, revision DESC LIMIT 20`,[qr]);
+    if(!rows.length){
+      rows=await all(`SELECT profile_key,record_key,record_json,updated_at,revision,facility,in_charge
+                      FROM profile_records
+                      WHERE dataset='logs' AND deleted_at IS NULL
+                      ORDER BY updated_at DESC, revision DESC LIMIT 50000`);
+      rows=rows.filter(r=>safeJson(r.record_json,{}).id===qr);
+    }
+    for(const row of rows){
+      const d=safeJson(row.record_json,{});
+      if(String(d.category||'').toUpperCase()!=='VISITOR') continue;
+      const descriptor=Array.isArray(d.faceDescriptor)?d.faceDescriptor.map(Number).filter(Number.isFinite):[];
+      if(descriptor.length<64) continue;
+      return res.json({ok:true,found:true,visitor:{id:String(d.id||row.record_key||qr),name:String(d.name||''),nameSource:String(d.nameSource||(d.identityVerificationMethod==='ID_OCR'?'ID_OCR':'MANUAL')),faceDescriptor:descriptor,profileKey:row.profile_key,facility:row.facility||'',inCharge:row.in_charge||'',updatedAt:row.updated_at||''}});
+    }
+    return res.json({ok:true,found:false});
+  }catch(e){next(e);}
+});
+
 app.get('/api/reconcile', requireDevice, async(req,res,next)=>{
   try {
     const since=String(req.query.since||'1970-01-01T00:00:00.000Z');
