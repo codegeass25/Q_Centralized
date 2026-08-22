@@ -5405,6 +5405,14 @@ function commitStagedTransaction() {
     
     borrowMsg.innerHTML = "🚀 Committed execution transaction mapping pipeline! " + operationsSucceeded + " changes synced."; borrowMsg.style.color = "#16a34a";
     
+    if(window.QLogCentral && typeof window.QLogCentral.syncDatasetsNow === 'function' && operationsSucceeded > 0){
+        window.QLogCentral.syncDatasetsNow(['books','borrowLogs','auditLogs']).catch(function(e){
+            console.error('QLog Central borrow sync failed:',e);
+            borrowMsg.innerHTML += ' <span style="color:#dc2626">Central sync failed — transaction retained locally.</span>';
+            borrowMsg.style.color = '#dc2626';
+        });
+    }
+
     if (currentBorrowScanMode === 'USB') {
          var hiddenSc = document.getElementById('borrowHiddenScanner');
          if(hiddenSc) hiddenSc.focus();
@@ -6579,6 +6587,13 @@ function recordEquipmentBorrow(){
     msgEl.textContent = '✅ ' + requestedQty + ' unit(s) of ' + item.name + ' released to ' + person.name + '. Expected return: ' + eqFmt(expMs) + ' (Ref ' + ref + ')';
     toast('✅ Equipment borrowing recorded • Qty ' + requestedQty, 'green');
     refreshEquipmentUI();
+    if(window.QLogCentral && typeof window.QLogCentral.syncDatasetsNow === 'function'){
+        window.QLogCentral.syncDatasetsNow(['equipment','equipLogs','auditLogs']).catch(function(e){
+            console.error('QLog Central equipment sync failed:',e);
+            msgEl.textContent += ' Central sync failed — transaction retained locally.';
+            msgEl.style.color = '#dc2626';
+        });
+    }
 }
 /* ---------- Return ---------- */
 function openEquipReturnModal(ref){
