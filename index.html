@@ -1008,7 +1008,10 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
 
 <div id="visitors" class="tab">
     <div class="card">
-    <h3>Visitor Registration</h3>
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;">
+        <h3 style="margin:0;">Visitor Registration</h3>
+        <button type="button" onclick="exportVisitorPDF()" style="background:#2563eb;">📄 Export Visitor Logs</button>
+    </div>
     <div style="margin-bottom: 5px;">
         <input id="visitorName" placeholder="Full Name (captured automatically from Valid ID / face recognition)" readonly oninput="onVisitorNameInput()" onchange="onVisitorNameInput()" onblur="onVisitorNameInput()">
         <div class="autofill-note" id="visitorNameSource">✓ Captured automatically</div>
@@ -1024,8 +1027,6 @@ body.mobile-tablet-id-capture .id-mobile-capture-btn{ display:inline-flex; }
     <input type="hidden" id="visitorPhoto">
     <br>
     <div class="visitor-flow-status" id="visitorFlowStatus">Waiting for a visitor QR scan…</div>
-    <hr>
-    <button onclick="exportVisitorPDF()">📄 Export All Visitor Records (PDF)</button>
     </div>
 </div>
 
@@ -2559,14 +2560,14 @@ async function _rebuildFaceDescriptorCache(){
             var name = names[n];
             // Backward compatible: older records only have the face image.
             if (byName[name].faceDescriptor && byName[name].faceDescriptor.length){
-                faceDescriptorCache.push({ name: name, descriptor: Float32Array.from(byName[name].faceDescriptor) });
+                faceDescriptorCache.push({ name: name, descriptor: Float32Array.from(byName[name].faceDescriptor), nameSource: getVisitorNameSource(name) || byName[name].nameSource || null, visitorId: byName[name].id || "" });
                 continue;
             }
             if (!byName[name].face) continue;
             var img = await faceapi.fetchImage(byName[name].face);
             var det = await faceapi.detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({inputSize: 224, scoreThreshold: 0.5}))
                                   .withFaceLandmarks().withFaceDescriptor();
-            if (det && det.descriptor) faceDescriptorCache.push({ name: name, descriptor: det.descriptor });
+            if (det && det.descriptor) faceDescriptorCache.push({ name: name, descriptor: det.descriptor, nameSource: getVisitorNameSource(name) || byName[name].nameSource || null, visitorId: byName[name].id || "" });
         }catch(e){ /* ignore individual failures */ }
     }
     console.log('[face-api] descriptor cache size:', faceDescriptorCache.length);
@@ -2575,6 +2576,37 @@ async function _rebuildFaceDescriptorCache(){
 function _euclidean(a, b){
     var s = 0; for (var i=0;i<a.length;i++){ var d = a[i]-b[i]; s += d*d; } return Math.sqrt(s);
 }
+async function _loadCentralVisitorProfile(qr){
+    var code=String(qr||'').trim();
+    if(!code || !window.QLogCentral || typeof window.QLogCentral.lookupVisitorByQR !== 'function') return null;
+    _visitorCentralLookupPending=true;
+    try{
+        var profile=await window.QLogCentral.lookupVisitorByQR(code);
+        if(profile && profile.name && Array.isArray(profile.faceDescriptor) && profile.faceDescriptor.length){
+            _visitorCentralProfile=profile;
+            visitorRegistrationState.centralProfile=profile;
+            visitorRegistrationState.centralLookupPending=false;
+            var found=false;
+            for(var i=0;i<faceDescriptorCache.length;i++){
+                if(faceDescriptorCache[i].visitorId===profile.id || faceDescriptorCache[i].name===profile.name){
+                    faceDescriptorCache[i]={name:profile.name,descriptor:Float32Array.from(profile.faceDescriptor),nameSource:profile.nameSource||'ID_OCR',visitorId:profile.id||code};
+                    found=true; break;
+                }
+            }
+            if(!found) faceDescriptorCache.push({name:profile.name,descriptor:Float32Array.from(profile.faceDescriptor),nameSource:profile.nameSource||'ID_OCR',visitorId:profile.id||code});
+            visitorRegistrationState.mode='RETURNING';
+            if(!visitorRegistrationState.faceRecognized) setVisitorFlowStatus('Central visitor profile found. Please look at the camera for AI face recognition.','');
+            return profile;
+        }
+        visitorRegistrationState.centralLookupPending=false;
+        return null;
+    }catch(e){
+        console.warn('[visitor] central profile lookup skipped',e);
+        visitorRegistrationState.centralLookupPending=false;
+        return null;
+    }finally{ _visitorCentralLookupPending=false; }
+}
+
 
 async function _faceRecognitionTick(){
     if (!faceApiReady) return;
@@ -2584,6 +2616,7 @@ async function _faceRecognitionTick(){
 
     var st = visitorRegistrationState;
     if (st.logged) return;
+    if (st.centralLookupPending){ _setFaceHud('detecting','Checking Central visitor profile…',20); return; }
 
     var dets;
     try{
@@ -2635,7 +2668,7 @@ async function _faceRecognitionTick(){
     if (!st.faceImage) { try { st.faceImage = _captureVisitorPhoto(); } catch(e){} }
 
     // Match against registered visitors
-    var best = {dist: Infinity, name: null};
+    var best = {dist: Infinity, name: null, entry: null};
     var second = Infinity;
     for (var i=0;i<faceDescriptorCache.length;i++){
         var d = _euclidean(det.descriptor, faceDescriptorCache[i].descriptor);
@@ -2658,7 +2691,7 @@ async function _faceRecognitionTick(){
                 _setFaceHud('matched', '\u2713 ' + best.name + ' (' + (confidence*100).toFixed(0) + '%)', confidence*100);
                 toast('\U0001f916 Visitor recognized: ' + best.name, 'green');
                 if (!st.idVerified && !st.manualNoId){
-                    var prevSource = getVisitorNameSource(best.name);
+                    var prevSource = (best.entry && best.entry.nameSource) || getVisitorNameSource(best.name);
                     if (prevSource === 'ID_OCR'){
                         // Name was originally established through a successful ID OCR:
                         // reuse it. No ID, no OCR.
@@ -2752,29 +2785,29 @@ function _requireIdRecheckForReturningVisitor(){
 /* Starts a full visitor session for a scanned unknown QR. */
 function startVisitorSession(code){
     resetVisitorRegistrationState();
-    visitorRegistrationState.qr = code;
-    var prior = logs.filter(function(l){ return l.id === code && l.category === 'VISITOR' && l.name; });
-    if (prior.length){
-        visitorRegistrationState.mode = 'RETURNING';
-        setVisitorFlowStatus('Registered visitor QR detected. Please look at the camera for AI face recognition.', '');
-    } else {
-        visitorRegistrationState.mode = 'NEW';
-        setVisitorFlowStatus('New visitor. Please look at the camera \u2014 identity verification will start automatically.', '');
-    }
-    showVisitorTab();
-    showTab('visitors', document.querySelector('#visitorTabBtn'));
+    visitorRegistrationState.qr=code;
+    var prior=logs.filter(function(l){return l.id===code && l.category==='VISITOR' && l.name;});
+    visitorRegistrationState.centralLookupPending=!!(window.QLogCentral && typeof window.QLogCentral.lookupVisitorByQR==='function' && navigator.onLine);
+    visitorRegistrationState.mode=prior.length?'RETURNING':'NEW';
+    setVisitorFlowStatus(prior.length?'Registered visitor QR detected. Checking Central and preparing AI face recognition…':'Checking Central visitor record. Please look at the camera…','');
+    showVisitorTab(); showTab('visitors',document.querySelector('#visitorTabBtn'));
+    _loadCentralVisitorProfile(code).finally(function(){
+        if(visitorRegistrationState.qr!==code || visitorRegistrationState.logged) return;
+        if(!visitorRegistrationState.faceRecognized){
+            setVisitorFlowStatus(visitorRegistrationState.centralProfile?'Central visitor profile found. Please look at the camera for AI face recognition.':(prior.length?'Registered visitor QR detected. Please look at the camera for AI face recognition.':'New visitor. Please look at the camera — identity verification will start automatically.'),'');
+        }
+    });
     startVisitorCamera();
-    _visitorIdentifyDeadline = Date.now() + (prior.length ? 15000 : 8000);
-    // Safety net: if the visitor is never recognized, fall back to Valid ID verification.
+    _visitorIdentifyDeadline=Date.now()+(prior.length?15000:12000);
     setTimeout(function(){
-        var st = visitorRegistrationState;
-        if (st.qr !== code || st.logged) return;
-        if (!st.faceRecognized && !st.idVerified && !st.manualNoId && !document.getElementById('validIdOverlay').classList.contains('open')){
-            setVisitorFlowStatus('Visitor not recognized. Choose <b>PRESENT VALID ID</b> or <b>NO VALID ID AVAILABLE</b>.', 'warn');
+        var st=visitorRegistrationState;
+        if(st.qr!==code || st.logged) return;
+        if(!st.faceRecognized && !st.idVerified && !st.manualNoId && !document.getElementById('validIdOverlay').classList.contains('open')){
+            setVisitorFlowStatus('Visitor not recognized. Choose <b>PRESENT VALID ID</b> or <b>NO VALID ID AVAILABLE</b>.','warn');
             openIdentityVerificationScreen(code);
         }
-    }, prior.length ? 15000 : 8000);
-    toast('Visitor QR scanned \u2014 starting verification', 'yellow');
+    }, prior.length ? 15000 : 12000);
+    toast('Visitor QR scanned — starting verification','yellow');
 }
 
 async function startVisitorCamera(){
@@ -3127,13 +3160,17 @@ var visitorRegistrationState = {
     nameSource: null,
     requiresIdRecheck: false,
     autoLogInProgress: false,
-    logged: false
+    logged: false,
+    centralProfile: null,
+    centralLookupPending: false
 };
 var visitorAutoLogInProgress = false;
 var visitorSaveInProgress = false;
 var _savingVisitor = false; // legacy alias
 var _visitorIdentifyDeadline = 0;
 var _unknownFaceStreak = 0;
+var _visitorCentralProfile = null;
+var _visitorCentralLookupPending = false;
 
 function resetVisitorRegistrationState(){
     visitorRegistrationState = {
@@ -3143,12 +3180,14 @@ function resetVisitorRegistrationState(){
         idSource: '', idNumber: '',
         idType: '', dob: '', faceDetected: false, faceRegistered: false, faceRecognized: false,
         faceDescriptor: null, faceImage: '', reason: '', nameSource: null, requiresIdRecheck: false,
-        autoLogInProgress: false, logged: false
+        autoLogInProgress: false, logged: false, centralProfile: null, centralLookupPending: false
     };
     _resetIdVerificationRuntime();
     visitorAutoLogInProgress = false;
     _visitorIdentifyDeadline = 0;
     _unknownFaceStreak = 0;
+    _visitorCentralProfile = null;
+    _visitorCentralLookupPending = false;
 }
 
 function setVisitorFlowStatus(text, kind){
@@ -4940,6 +4979,10 @@ function saveVisitorLog(data){
         logs.push(rec); visitorTempLogs[vid] = rec;
         try {
             saveAll();
+            // Push a newly registered visitor immediately so another office can identify the same face from Central.
+            if(window.QLogCentral && navigator.onLine && typeof window.QLogCentral.syncDatasetsNow === 'function'){
+                window.QLogCentral.syncDatasetsNow(['logs']).catch(function(e){ console.warn('[visitor] immediate central sync skipped', e); });
+            }
         } catch(e){
             logs.pop(); delete visitorTempLogs[vid];
             toast('\u274c Failed to save visitor log: ' + (e && e.message ? e.message : e), 'red');
@@ -4951,9 +4994,9 @@ function saveVisitorLog(data){
             if(data.faceDescriptor){
                 var replaced = false;
                 for(var i = 0; i < faceDescriptorCache.length; i++){
-                    if(faceDescriptorCache[i].name === name){ faceDescriptorCache[i].descriptor = data.faceDescriptor; replaced = true; break; }
+                    if(faceDescriptorCache[i].name === name){ faceDescriptorCache[i].descriptor = data.faceDescriptor; faceDescriptorCache[i].nameSource = rec.nameSource || null; faceDescriptorCache[i].visitorId = rec.id || ""; replaced = true; break; }
                 }
-                if(!replaced) faceDescriptorCache.push({ name: name, descriptor: data.faceDescriptor });
+                if(!replaced) faceDescriptorCache.push({ name: name, descriptor: data.faceDescriptor, nameSource: rec.nameSource || null, visitorId: rec.id || "" });
             }
         } catch(e){}
         try { renderLogs(); } catch(e){}
@@ -5098,17 +5141,69 @@ function exportAuditTrail() {
     }
 }
 
-function exportVisitorPDF(){
+async function exportVisitorPDF(){
+    function safeText(v){
+        if(v === null || v === undefined) return '';
+        if(typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+        try { return JSON.stringify(v); } catch(e) { return String(v); }
+    }
+    function esc(v){
+        return safeText(v).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; });
+    }
+    function errorText(err){
+        if(err === null || err === undefined) return 'Unknown error';
+        if(typeof err === 'string') return err;
+        if(err.message) return String(err.message);
+        try{return JSON.stringify(err);}catch(e){return String(err);}
+    }
     try{
-        var visitors = logs.filter(function(v){ return (v.category||'').toUpperCase() === 'VISITOR'; });
+        var visitors = Array.isArray(logs) ? logs.filter(function(v){ return String(v && v.category || '').toUpperCase() === 'VISITOR'; }) : [];
         if(visitors.length === 0){ alert('No visitor records found.'); return; }
-        var sigHtml = getSignatureBlock();
-        var html = '<div style="font-family:Arial;padding:15px;"><h2 style="text-align:center;">Visitor Records Report</h2>';
-        visitors.forEach(function(v, i){ html += '<div style="border:1px solid #000;padding:12px;margin-bottom:15px;page-break-inside:avoid;"><h3>Visitor #' + (i+1) + '</h3><p><b>Name:</b> ' + (v.name||'') + '</p><p><b>Date:</b> ' + (v.date||'') + '</p><p><b>Time In:</b> ' + (v.timein||'') + '</p><p><b>Time Out:</b> ' + (v.timeout||'') + '</p><p><b>Reason:</b> ' + (v.reason||'') + '</p><p><b>Identity Verification:</b> ' + (v.identityVerification || (v.identityVerificationMethod === 'MANUAL_NO_ID' ? 'MANUAL ENTRY \u2014 NO ID PRESENTED' : (v.idVerified ? 'VALID ID / OCR' : 'NOT RECORDED'))) + '</p><p><b>ID Verified:</b> ' + (v.idVerified === true ? 'YES' : 'NO') + '</p><div><b>Captured Face:</b><br>' + (v.face ? '<img src="' + v.face + '" style="width:200px;border:1px solid #000;">' : 'No photo available') + '</div></div>'; });
+        var sigHtml = (typeof getSignatureBlock === 'function') ? safeText(getSignatureBlock()) : '';
+        var html = '<div style="font-family:Arial;padding:15px;"><h2 style="text-align:center;">Visitor Records Report</h2>' +
+                   '<p style="text-align:center;">Generated: ' + esc(new Date().toLocaleString()) + ' • Total Visitors: ' + visitors.length + '</p>';
+        visitors.forEach(function(v,i){
+            var identity = v.identityVerification ||
+                (v.identityVerificationMethod === 'MANUAL_NO_ID' ? 'MANUAL ENTRY — NO VALID ID PRESENTED' :
+                (v.idVerified === true ? 'VALID ID / OCR' : 'NOT RECORDED'));
+            var face = (v && typeof v.face === 'string' && /^data:image\/(png|jpe?g|webp);base64,/i.test(v.face))
+                ? '<img src="' + esc(v.face) + '" style="max-width:200px;max-height:180px;border:1px solid #000;object-fit:cover;">'
+                : 'No photo available';
+            html += '<div style="border:1px solid #000;padding:12px;margin-bottom:15px;page-break-inside:avoid;">' +
+                '<h3>Visitor #' + (i+1) + '</h3>' +
+                '<p><b>Name:</b> ' + esc(v.name) + '</p>' +
+                '<p><b>Date:</b> ' + esc(v.date) + '</p>' +
+                '<p><b>Time In:</b> ' + esc(v.timein) + '</p>' +
+                '<p><b>Time Out:</b> ' + esc(v.timeout) + '</p>' +
+                '<p><b>Reason:</b> ' + esc(v.reason) + '</p>' +
+                '<p><b>Identity Verification:</b> ' + esc(identity) + '</p>' +
+                '<p><b>ID Verified:</b> ' + (v.idVerified === true ? 'YES' : 'NO') + '</p>' +
+                '<div><b>Captured Face:</b><br>' + face + '</div></div>';
+        });
         html += sigHtml + '</div>';
-        var container = document.createElement('div'); container.innerHTML = html;
-        if(typeof html2pdf !== 'undefined') { html2pdf().from(container).set({ margin: 10, filename: 'Visitor_Records_Report.pdf', image: {type: 'jpeg', quality: 0.95}, html2canvas: {scale: 2, useCORS: true}, jsPDF: {unit: 'mm', format: 'a4', orientation: 'portrait'} }).save(); }
-    } catch(err) {}
+        var container=document.createElement('div');
+        container.innerHTML=html;
+        if(typeof html2pdf === 'function'){
+            await html2pdf().from(container).set({
+                margin:10, filename:'Visitor_Records_Report.pdf',
+                image:{type:'jpeg',quality:0.95}, html2canvas:{scale:2,useCORS:true,logging:false},
+                jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}
+            }).save();
+            toast('✅ Visitor logs exported successfully.','green');
+            return;
+        }
+        var w=window.open('','_blank','width=1200,height=800');
+        if(!w) throw new Error('POPUP_BLOCKED');
+        w.document.open();
+        w.document.write('<!doctype html><html><head><title>Visitor Records Report</title><style>body{font-family:Arial;padding:24px}img{max-width:200px;max-height:180px}</style></head><body>'+html+'</body></html>');
+        w.document.close(); w.focus(); setTimeout(function(){w.print();},250);
+        toast('✅ Visitor logs opened for printing.','green');
+    }catch(err){
+        console.error('[visitor-export]',err);
+        var msg=errorText(err);
+        toast('❌ Visitor log export failed: '+msg,'red');
+        alert('Visitor log export failed.\n\n'+msg);
+    }
 }
 
 async function _qrDataURL(text, size){
@@ -6664,7 +6759,7 @@ function renderEquipSelect(){
         .sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); })
         .forEach(function(e){ html += '<option value="' + eqEsc(e.id) + '">' + eqEsc(e.name) + ' (' + eqEsc(e.id) + ') • ' + eqAvailableQty(e) + '/' + eqQty(e) + ' available</option>'; });
     sel.innerHTML = html;
-    if(cur && findEquipment(cur) && findEquipment(cur).status === 'AVAILABLE') sel.value = cur;
+    if(cur && findEquipment(cur)) sel.value = cur;
 }
 function renderEquipActive(){
     var rows = equipLogs.filter(function(l){
