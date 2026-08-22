@@ -5786,7 +5786,7 @@ function openEquipRegistryModal(){
 }
 function closeEquipRegistryModal(){ document.getElementById('equipRegistryModal').style.display = 'none'; }
 
-function saveEquipmentItem(){
+async function saveEquipmentItem(){
     var id   = document.getElementById('eqNewId').value.trim();
     var name = document.getElementById('eqNewName').value.trim();
     var cat  = document.getElementById('eqNewCategory').value.trim();
@@ -5794,6 +5794,34 @@ function saveEquipmentItem(){
     var cond = document.getElementById('eqNewCondition').value;
     if(!id || !name){ toast('⚠️ Equipment ID and Name are required.','red'); return; }
     if(!unit){ toast('⚠️ Assigned unit is required.','red'); return; }
+
+    /* Cross-office ownership check BEFORE touching local equipment. */
+    try {
+        if(window.QLogCentral && typeof window.QLogCentral.checkInventoryBatch === 'function'){
+            var check = await window.QLogCentral.checkInventoryBatch('equipment',[{
+                id:id,
+                name:name,
+                category:cat || 'General',
+                unit:unit,
+                condition:cond || 'Good'
+            }]);
+            var conflict = check && check.conflicts && check.conflicts.length ? check.conflicts[0] : null;
+            if(conflict && conflict.reason === 'ALREADY_ASSIGNED_TO_OTHER_PROFILE'){
+                var owner = conflict.existingFacility || 'another office/laboratory';
+                var person = conflict.existingInCharge ? ' under ' + conflict.existingInCharge : '';
+                toast('⛔ Already added in ' + owner + person + '. This equipment cannot be added here.','red',5000);
+                return;
+            }
+            if(conflict && conflict.reason === 'DUPLICATE_IN_IMPORT'){
+                toast('⛔ This equipment is already present in the current Central inventory.','red',5000);
+                return;
+            }
+        }
+    } catch(e) {
+        toast('⚠️ Could not verify equipment ownership with Central. Nothing was added.','red',4500);
+        return;
+    }
+
     var ex = findEquipment(id);
     if(ex){
         if(!sameUnit(ex.unit, currentSession.facility)){
@@ -5947,7 +5975,7 @@ function _eqPick(row, keys){
 /* Bulk import. Existing Equipment IDs are UPDATED in place (never duplicated)
    and only when the current unit is authorized to touch them; active
    borrowing status and history are always preserved. */
-function importEquipmentExcel(){
+async function importEquipmentExcel(){
     if(!canAccessEquipmentModule()){ toast('⛔ Not authorized for the Equipment module.','red'); return; }
     var fileInput = document.getElementById('eqImportFile');
     var resEl = document.getElementById('eqImportResult');
@@ -5958,9 +5986,10 @@ function importEquipmentExcel(){
     if(typeof XLSX === 'undefined'){ alert('Local Excel library not loaded.'); return; }
     var f = fileInput.files[0];
     var r = new FileReader();
-    r.onload = function(ev){
-        var added = 0, updated = 0, skipped = 0, invalid = 0;
+    r.onload = async function(ev){
+        var added = 0, updated = 0, skipped = 0, invalid = 0, crossOffice = 0;
         var problems = [];
+        var candidates = [];
         try {
             var wb = XLSX.read(new Uint8Array(ev.target.result), { type: 'array' });
             var rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
@@ -5986,11 +6015,48 @@ function importEquipmentExcel(){
                 }
                 if(EQ_IMPORT_STATUSES.indexOf(status) === -1) status = '';
 
+                candidates.push({
+                    rowIndex:idx,
+                    id:id,
+                    name:name,
+                    category:cat || 'General',
+                    unit:unit,
+                    condition:cond || 'Good',
+                    status:status,
+                    remarks:remarks || ''
+                });
+            });
+
+            if(window.QLogCentral && typeof window.QLogCentral.checkInventoryBatch === 'function' && candidates.length){
+                var check = await window.QLogCentral.checkInventoryBatch('equipment', candidates);
+                var conflictsByIndex = {};
+                (check.conflicts || []).forEach(function(c){ conflictsByIndex[c.index] = c; });
+
+                candidates = candidates.filter(function(item, idx){
+                    var c = conflictsByIndex[idx];
+                    if(!c) return true;
+                    skipped++;
+                    if(c.reason === 'ALREADY_ASSIGNED_TO_OTHER_PROFILE'){
+                        crossOffice++;
+                        var owner = c.existingFacility || 'another office/laboratory';
+                        var person = c.existingInCharge ? ' under ' + c.existingInCharge : '';
+                        problems.push(item.id + ': already added in ' + owner + person + '.');
+                    } else if(c.reason === 'DUPLICATE_IN_IMPORT'){
+                        problems.push(item.id + ': duplicate in this import.');
+                    } else {
+                        problems.push(item.id + ': duplicate inventory record.');
+                    }
+                    return false;
+                });
+            }
+
+            candidates.forEach(function(item){
+                var id=item.id, name=item.name, cat=item.category, unit=item.unit, cond=item.condition, status=item.status, remarks=item.remarks;
                 var ex = findEquipment(id);
                 if(ex){
-                    // Same unit/authorization rule as the manual registry form.
                     if(!sameUnit(ex.unit, currentSession.facility)){
                         skipped++;
+                        crossOffice++;
                         problems.push(id + ': assigned to ' + ex.unit + ' - only that unit may update it.');
                         return;
                     }
@@ -6000,7 +6066,6 @@ function importEquipmentExcel(){
                     ex.unit      = unit;
                     ex.condition = cond || ex.condition || 'Good';
                     if(remarks) ex.remarks = remarks;
-                    // Never reset an active transaction; borrowing history untouched.
                     if(!act && status) ex.status = status;
                     updated++;
                 } else {
@@ -6019,19 +6084,26 @@ function importEquipmentExcel(){
                 }
             });
         } catch(err){
-            if(resEl){ resEl.style.color = '#dc2626'; resEl.textContent = 'Could not read the file: ' + (err && err.message ? err.message : 'invalid workbook'); }
+            if(resEl){ resEl.style.color = '#dc2626'; resEl.textContent = 'Could not read or verify the file: ' + (err && err.message ? err.message : 'invalid workbook'); }
+            toast('⛔ Equipment import failed — Central verification was not completed.','red',5000);
             return;
         }
         saveEquipData();
         refreshEquipmentUI();
         if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ window.QLogCentral.syncDatasets(['equipment','equipLogs']); }
-        eqAudit('EQUIPMENT_BULK_IMPORT', 'Added: ' + added + ', Updated: ' + updated + ', Skipped: ' + skipped + ', Invalid: ' + invalid + ' (file: ' + f.name + ')');
+        eqAudit('EQUIPMENT_BULK_IMPORT', 'Added: ' + added + ', Updated: ' + updated + ', Skipped: ' + skipped + ', Cross-office blocked: ' + crossOffice + ', Invalid: ' + invalid + ' (file: ' + f.name + ')');
         if(resEl){
             resEl.style.color = (invalid || skipped) ? '#b45309' : '#16a34a';
             resEl.innerHTML = '✅ Added: <b>' + added + '</b> &nbsp; ♻ Updated: <b>' + updated + '</b> &nbsp; ⏭ Skipped: <b>' + skipped + '</b> &nbsp; ⚠ Invalid: <b>' + invalid + '</b>' +
                 (problems.length ? '<div style="margin-top:6px;font-weight:400;color:#64748b;font-size:12px;">' + problems.slice(0,12).map(eqEsc).join('<br>') + (problems.length > 12 ? '<br>… and ' + (problems.length - 12) + ' more' : '') + '</div>' : '');
         }
-        toast('📥 Equipment import complete — ' + added + ' added, ' + updated + ' updated.', (invalid || skipped) ? 'blue' : 'green');
+        if(crossOffice > 0){
+            toast('⛔ ' + crossOffice + ' equipment item(s) already added in another office/laboratory. Nothing was added for those items.','red',5500);
+        }else if(skipped > 0){
+            toast('⚠️ Equipment import completed with ' + skipped + ' duplicate/skipped item(s).','yellow',4500);
+        }else{
+            toast('📥 Equipment import complete — ' + added + ' added, ' + updated + ' updated.','green');
+        }
         fileInput.value = '';
     };
     r.readAsArrayBuffer(f);
