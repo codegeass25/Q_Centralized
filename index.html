@@ -5387,7 +5387,7 @@ function commitStagedTransaction() {
             dueDate.setDate(borrowDate.getDate() + policy.days);
 
             borrowLogs.push({
-                l: item.lId, learnerName: item.learnerName, gs: item.gs, b: item.isbn, qty: borrowQty, s: 'BORROWED',
+                l: item.lId, learnerName: item.learnerName, gs: item.gs, b: item.isbn, bookTitle: item.title, qty: borrowQty, s: 'BORROWED',
                 borrowedAt: borrowDate.toLocaleString(), dueDateStr: dueDate.toLocaleDateString(), dueDateMs: dueDate.getTime(),
                 returnedAt: "", overdueDays: 0, extensions: 0, remarks: ""
             });
@@ -5405,14 +5405,6 @@ function commitStagedTransaction() {
     
     borrowMsg.innerHTML = "🚀 Committed execution transaction mapping pipeline! " + operationsSucceeded + " changes synced."; borrowMsg.style.color = "#16a34a";
     
-    if(window.QLogCentral && typeof window.QLogCentral.syncDatasetsNow === 'function' && operationsSucceeded > 0){
-        window.QLogCentral.syncDatasetsNow(['books','borrowLogs','auditLogs']).catch(function(e){
-            console.error('QLog Central borrow sync failed:',e);
-            borrowMsg.innerHTML += ' <span style="color:#dc2626">Central sync failed — transaction retained locally.</span>';
-            borrowMsg.style.color = '#dc2626';
-        });
-    }
-
     if (currentBorrowScanMode === 'USB') {
          var hiddenSc = document.getElementById('borrowHiddenScanner');
          if(hiddenSc) hiddenSc.focus();
@@ -5875,7 +5867,7 @@ async function saveEquipmentItem(){
         eqAudit('EQUIPMENT_ADD', id + ' - ' + name + ' @ ' + unit + ' | qty=' + qty);
     }
     saveEquipData();
-    if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ window.QLogCentral.syncDatasets(['equipment','equipLogs']); }
+    if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){ return window.QLogCentral.syncDatasetsNow(['equipment','equipLogs','auditLogs']); }
     document.getElementById('eqNewId').value = '';
     document.getElementById('eqNewName').value = '';
     document.getElementById('eqNewCategory').value = '';
@@ -6067,14 +6059,16 @@ async function saveEquipmentInline(id){
         eqNormalizeItemState(it);
 
         saveEquipData();
-        if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){
-            window.QLogCentral.syncDatasets(['equipment','equipLogs']);
+        if(window.QLogCentral && typeof window.QLogCentral.syncDatasetsNow === 'function'){
+            await window.QLogCentral.syncDatasetsNow(['equipment','equipLogs','auditLogs']);
+        } else if(window.QLogCentral && typeof window.QLogCentral.syncDatasets === 'function'){
+            window.QLogCentral.syncDatasets(['equipment','equipLogs','auditLogs']);
         }
 
         editingEquipmentId = null;
         refreshEquipmentUI();
         eqAudit('EQUIPMENT_UPDATE_INLINE', it.id + ' - ' + it.name + ' @ ' + it.unit + ' | qty=' + qty);
-        toast('✅ Equipment updated: ' + it.id + ' • Qty ' + qty + ' • Central sync queued.','green',3200);
+        toast('✅ Equipment updated: ' + it.id + ' • Qty ' + qty + ' • Central synchronized.','green',3200);
     }catch(e){
         toast('⛔ Equipment update was not saved — Central verification failed.','red',4500);
     }
@@ -6495,6 +6489,7 @@ function processEquipScan(code){
 
 function applyBorrowerScan(person){
     document.getElementById('eqBorrowerScan').value = person.id;
+    stagedEquipmentTransaction.borrowerId = person.id; persistEquipmentStaging();
     var extra = [person.category, person.grade, person.section].filter(function(v){ return !!v; }).join(' • ');
     document.getElementById('eqBorrowerInfo').innerHTML = '✅ <b>' + eqEsc(person.name) + '</b>' + (extra ? ' — ' + eqEsc(extra) : '');
     document.getElementById('eqBorrowMsg').textContent = '';
@@ -6502,6 +6497,7 @@ function applyBorrowerScan(person){
 }
 function applyEquipmentScan(item){
     document.getElementById('eqItemScan').value = item.id;
+    stagedEquipmentTransaction.equipmentId = item.id; persistEquipmentStaging();
     var sel = document.getElementById('eqItemSelect');
     if(sel) sel.value = item.id;
     var msg = '';
@@ -6519,7 +6515,7 @@ function applyEquipmentScan(item){
 }
 function selectEquipmentFromList(){
     var v = document.getElementById('eqItemSelect').value;
-    if(!v){ document.getElementById('eqItemScan').value = ''; document.getElementById('eqItemInfo').textContent = 'No equipment selected yet.'; return; }
+    if(!v){ document.getElementById('eqItemScan').value = ''; stagedEquipmentTransaction.equipmentId=''; persistEquipmentStaging(); document.getElementById('eqItemInfo').textContent = 'No equipment selected yet.'; return; }
     var it = findEquipment(v); if(it) applyEquipmentScan(it);
 }
 function clearEquipStaging(){
@@ -6532,6 +6528,8 @@ function clearEquipStaging(){
     if(document.getElementById('eqBorrowQty')) document.getElementById('eqBorrowQty').value = '1';
     document.getElementById('eqBorrowMsg').textContent = '';
     equipDup = {};
+    stagedEquipmentTransaction = { borrowerId:'', equipmentId:'', borrowQty:1 };
+    try{ localStorage.removeItem('qlog_eq_staging'); }catch(e){}
 }
 
 /* ---------- Borrow ---------- */
@@ -6540,8 +6538,11 @@ function recordEquipmentBorrow(){
     var fail = function(t){ msgEl.style.color = '#dc2626'; msgEl.textContent = t; toast(t, 'red'); };
     if(!canAccessEquipmentModule()){ fail('⛔ Your unit is not authorized to use Equipment Borrowing.'); return; }
 
-    var bid = document.getElementById('eqBorrowerScan').value.trim();
-    var eid = document.getElementById('eqItemScan').value.trim() || document.getElementById('eqItemSelect').value;
+    var bid = document.getElementById('eqBorrowerScan').value.trim() || stagedEquipmentTransaction.borrowerId;
+    if(bid) stagedEquipmentTransaction.borrowerId=bid;
+    stagedEquipmentTransaction.borrowQty = Math.max(1, parseInt((document.getElementById('eqBorrowQty')||{}).value || stagedEquipmentTransaction.borrowQty || '1',10)||1); persistEquipmentStaging();
+    var eid = document.getElementById('eqItemScan').value.trim() || document.getElementById('eqItemSelect').value || stagedEquipmentTransaction.equipmentId;
+    if(eid) stagedEquipmentTransaction.equipmentId=eid;
     var requestedQty = Math.max(1, parseInt((document.getElementById('eqBorrowQty')||{}).value || '1', 10) || 1);
     if(!bid){ fail('⛔ Scan the borrower QR first. Unregistered borrowers are not allowed.'); return; }
     var person = findPerson(bid);
@@ -6587,13 +6588,6 @@ function recordEquipmentBorrow(){
     msgEl.textContent = '✅ ' + requestedQty + ' unit(s) of ' + item.name + ' released to ' + person.name + '. Expected return: ' + eqFmt(expMs) + ' (Ref ' + ref + ')';
     toast('✅ Equipment borrowing recorded • Qty ' + requestedQty, 'green');
     refreshEquipmentUI();
-    if(window.QLogCentral && typeof window.QLogCentral.syncDatasetsNow === 'function'){
-        window.QLogCentral.syncDatasetsNow(['equipment','equipLogs','auditLogs']).catch(function(e){
-            console.error('QLog Central equipment sync failed:',e);
-            msgEl.textContent += ' Central sync failed — transaction retained locally.';
-            msgEl.style.color = '#dc2626';
-        });
-    }
 }
 /* ---------- Return ---------- */
 function openEquipReturnModal(ref){
@@ -6664,13 +6658,16 @@ function renderEquipDashboard(){
 function renderEquipSelect(){
     var sel = document.getElementById('eqItemSelect');
     if(!sel) return;
-    var cur = sel.value;
+    var cur = sel.value || stagedEquipmentTransaction.equipmentId;
     var html = '<option value="">-- Select available equipment --</option>';
     equipment.filter(function(e){ return sameUnit(e.unit, currentSession.facility) && eqAvailableQty(e) > 0; })
         .sort(function(a,b){ return String(a.name).localeCompare(String(b.name)); })
         .forEach(function(e){ html += '<option value="' + eqEsc(e.id) + '">' + eqEsc(e.name) + ' (' + eqEsc(e.id) + ') • ' + eqAvailableQty(e) + '/' + eqQty(e) + ' available</option>'; });
     sel.innerHTML = html;
-    if(cur && findEquipment(cur) && findEquipment(cur).status === 'AVAILABLE') sel.value = cur;
+    if(cur && findEquipment(cur) && eqAvailableQty(findEquipment(cur)) > 0) { sel.value = cur; document.getElementById('eqItemScan').value = cur; }
+    if(stagedEquipmentTransaction.borrowerId){ document.getElementById('eqBorrowerScan').value = stagedEquipmentTransaction.borrowerId; var p=findPerson(stagedEquipmentTransaction.borrowerId); if(p) applyBorrowerScan(p); }
+    if(stagedEquipmentTransaction.equipmentId){ var si=findEquipment(stagedEquipmentTransaction.equipmentId); if(si && eqAvailableQty(si)>0) applyEquipmentScan(si); }
+    if(document.getElementById('eqBorrowQty')) document.getElementById('eqBorrowQty').value = String(stagedEquipmentTransaction.borrowQty||1);
 }
 function renderEquipActive(){
     var rows = equipLogs.filter(function(l){
