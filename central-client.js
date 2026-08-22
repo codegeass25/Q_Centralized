@@ -272,6 +272,9 @@
       localStorage.removeItem(RESET_KEY);
     }finally{state.suppress=false;}
     refreshUi();
+    try{ if(typeof renderEquipRegistry==='function') renderEquipRegistry(); }catch(e){}
+    try{ if(typeof renderEquipLogs==='function') renderEquipLogs(); }catch(e){}
+    try{ if(typeof refreshEquipmentUI==='function') refreshEquipmentUI(); }catch(e){}
   }
 
   function localResetHeld(scope){
@@ -612,6 +615,11 @@
     window.addEventListener('online',function(){watchProfile();setStatus('Online — syncing '+scopeLabel()+'…','warn');sync(true);fullProfileReconcile();connectSocket();});
   }
 
+  async function checkInventoryBatch(dataset,items){
+    if(!state.token||!navigator.onLine) throw new Error('PROFILE_AUTH_REQUIRED');
+    return await api('/api/inventory/check-batch',{method:'POST',body:JSON.stringify({dataset:dataset,items:Array.isArray(items)?items:[]})});
+  }
+
   window.QLogCentral={
     connect:function(){var i=document.getElementById('qlogCentralCode');if(i)connectWithCode(i.value.trim());},
     closeAuth:closeAuth,
@@ -624,7 +632,8 @@
     getSourceId:function(){return state.sourceId;},
     getFacility:function(){return state.activeFacility;},
     getProfileKey:function(){return state.activeProfileKey;},
-    getProfile:function(){return {facility:currentFacility(),inCharge:currentInCharge(),profileKey:state.activeProfileKey};}
+    getProfile:function(){return {facility:currentFacility(),inCharge:currentInCharge(),profileKey:state.activeProfileKey};},
+    checkInventoryBatch:checkInventoryBatch
   };
 
   window.addEventListener('load',function(){setTimeout(init,1200);});
