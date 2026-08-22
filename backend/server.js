@@ -786,6 +786,63 @@ async function canonicalKeyFor(profile,dataset,incomingKey,fp){
   return {key:incomingKey,alias:false};
 }
 
+app.post('/api/inventory/check-batch', requireDevice, async(req,res,next)=>{
+  try {
+    const body=req.body||{};
+    const dataset=String(body.dataset||'equipment').trim();
+    if(dataset!=='equipment' && dataset!=='books'){
+      return res.status(400).json({ok:false,error:'INVALID_INVENTORY_DATASET'});
+    }
+    const items=Array.isArray(body.items)?body.items:[];
+    const conflicts=[];
+    const allowed=[];
+    const seen=new Set();
+
+    for(let i=0;i<items.length;i++){
+      const item=items[i]||{};
+      const identity=recordFingerprint(dataset,item);
+      if(!identity){
+        allowed.push(i);
+        continue;
+      }
+
+      if(seen.has(identity)){
+        conflicts.push({
+          index:i,
+          reason:'DUPLICATE_IN_IMPORT',
+          identityKey:identity
+        });
+        continue;
+      }
+      seen.add(identity);
+
+      const existing=await get(
+        `SELECT identity_key,last_facility,last_in_charge,last_profile_key,record_json
+         FROM central_registry
+         WHERE dataset=? AND identity_key=?`,
+        [dataset,identity]
+      );
+
+      if(existing && existing.last_profile_key!==req.device.profile_key){
+        const oldObj=safeJson(existing.record_json,{});
+        conflicts.push({
+          index:i,
+          reason:'ALREADY_ASSIGNED_TO_OTHER_PROFILE',
+          identityKey:identity,
+          existingFacility:existing.last_facility||oldObj.unit||oldObj.facility||'',
+          existingInCharge:existing.last_in_charge||'',
+          existingId:oldObj.id||oldObj.assetNo||oldObj.asset||oldObj.productId||oldObj.equipmentId||'' ,
+          existingName:oldObj.name||oldObj.eqName||oldObj.title||''
+        });
+      }else{
+        allowed.push(i);
+      }
+    }
+
+    res.json({ok:true,dataset,allowed,conflicts});
+  }catch(e){next(e);}
+});
+
 app.post('/api/sync', requireDevice, async(req,res,next)=>{
   try {
     const currentGeneration = await getCentralResetGeneration();
