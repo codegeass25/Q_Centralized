@@ -10,7 +10,7 @@
      service-worker update.
    ===================================================================== */
 
-const CACHE_NAME = "qlogpro-offline-v16-equipment-ownership-reset";
+const CACHE_NAME = "qlogpro-offline-v17-equipment-qty-central-cards";
 
 const PRECACHE_URLS = [
   "./",
