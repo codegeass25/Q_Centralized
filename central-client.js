@@ -699,6 +699,14 @@
     }catch(e){ return null; }
   }
 
+  async function lookupVisitorFaces(){
+    if(!state.token||!navigator.onLine)return [];
+    try{
+      var resp=await api('/api/visitors/faces');
+      return (resp&&Array.isArray(resp.visitors))?resp.visitors:[];
+    }catch(e){ return []; }
+  }
+
   async function checkInventoryBatch(dataset,items){
     if(!state.token||!navigator.onLine) throw new Error('PROFILE_AUTH_REQUIRED');
     return await api('/api/inventory/check-batch',{method:'POST',body:JSON.stringify({dataset:dataset,items:Array.isArray(items)?items:[]})});
@@ -738,6 +746,7 @@
     getProfile:function(){return {facility:currentFacility(),inCharge:currentInCharge(),profileKey:state.activeProfileKey};},
     checkInventoryBatch:checkInventoryBatch,
     lookupVisitorByQR:lookupVisitorByQR,
+    lookupVisitorFaces:lookupVisitorFaces,
     profileChanged:profileChanged
   };
 
