@@ -1003,7 +1003,10 @@ app.get('/api/visitors/faces', requireDevice, async(req,res,next)=>{
       const descriptor=Array.isArray(d.faceDescriptor)?d.faceDescriptor.map(Number).filter(Number.isFinite):[];
       if(!name || descriptor.length<64) continue;
       const id=String(d.visitorProfileId||d.id||'').trim();
-      const key=id || `${name.toLowerCase()}::${descriptor.slice(0,8).join(',')}`;
+      // Keep distinct real face samples from Central visit records so a returning
+      // visitor can match against more than one capture of the same face.
+      const fingerprint=descriptor.slice(0,16).map(v=>Number(v).toFixed(5)).join(',');
+      const key=(id || name.toLowerCase())+'::'+fingerprint;
       if(seen.has(key)) continue;
       seen.add(key);
       visitors.push({
