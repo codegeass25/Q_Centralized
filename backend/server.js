@@ -976,6 +976,51 @@ app.get('/api/visitors/lookup', requireDevice, async(req,res,next)=>{
   }catch(e){next(e);}
 });
 
+// Cross-office visitor recognition is FACE + registered NAME based. QR is not the
+// identity key. This endpoint returns the Centralized visitor face directory so any
+// office/device can recognize a returning visitor without relying on a local log or QR.
+app.get('/api/visitors/faces', requireDevice, async(req,res,next)=>{
+  try {
+    let rows;
+    try {
+      rows=await all(`SELECT profile_key,record_key,record_json,updated_at,revision,facility,in_charge
+                      FROM profile_records
+                      WHERE dataset='logs' AND deleted_at IS NULL
+                        AND json_extract(record_json,'$.category')='VISITOR'
+                      ORDER BY updated_at DESC, revision DESC LIMIT 50000`);
+    } catch(_e) {
+      rows=await all(`SELECT profile_key,record_key,record_json,updated_at,revision,facility,in_charge
+                      FROM profile_records
+                      WHERE dataset='logs' AND deleted_at IS NULL
+                      ORDER BY updated_at DESC, revision DESC LIMIT 50000`);
+    }
+    const seen=new Set();
+    const visitors=[];
+    for(const row of rows){
+      const d=safeJson(row.record_json,{});
+      if(String(d.category||'').toUpperCase()!=='VISITOR') continue;
+      const name=String(d.name||'').trim();
+      const descriptor=Array.isArray(d.faceDescriptor)?d.faceDescriptor.map(Number).filter(Number.isFinite):[];
+      if(!name || descriptor.length<64) continue;
+      const id=String(d.visitorProfileId||d.id||'').trim();
+      const key=id || `${name.toLowerCase()}::${descriptor.slice(0,8).join(',')}`;
+      if(seen.has(key)) continue;
+      seen.add(key);
+      visitors.push({
+        id:id || row.record_key,
+        name,
+        nameSource:String(d.nameSource||(d.identityVerificationMethod==='ID_OCR'?'ID_OCR':'MANUAL')),
+        faceDescriptor:descriptor,
+        profileKey:row.profile_key,
+        facility:row.facility||'',
+        inCharge:row.in_charge||'',
+        updatedAt:row.updated_at||''
+      });
+    }
+    return res.json({ok:true,count:visitors.length,visitors,source:'central-face-directory',identityKey:'FACE+NAME'});
+  } catch(e) { next(e); }
+});
+
 app.get('/api/reconcile', requireDevice, async(req,res,next)=>{
   try {
     const since=String(req.query.since||'1970-01-01T00:00:00.000Z');
