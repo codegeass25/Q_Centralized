@@ -2580,10 +2580,20 @@ function _euclidean(a, b){
 }
 async function _loadCentralVisitorProfile(qr){
     var code=String(qr||'').trim();
-    if(!code || !window.QLogCentral || typeof window.QLogCentral.lookupVisitorByQR !== 'function') return null;
+    if(!code) return null;
     _visitorCentralLookupPending=true;
     try{
-        var profile=await window.QLogCentral.lookupVisitorByQR(code);
+        // During a fast office switch the Central client may still be completing
+        // its profile handoff. Wait briefly for the authenticated lookup surface
+        // instead of falling back to a local-only face cache.
+        var profile = null;
+        for(var wait=0; wait<16 && !profile; wait++){
+            if(window.QLogCentral && typeof window.QLogCentral.lookupVisitorByQR === 'function'){
+                try{ profile=await window.QLogCentral.lookupVisitorByQR(code); }catch(e){ profile=null; }
+            }
+            if(profile) break;
+            await new Promise(function(r){setTimeout(r,250);});
+        }
         if(profile && profile.name && Array.isArray(profile.faceDescriptor) && profile.faceDescriptor.length){
             _visitorCentralProfile=profile;
             visitorRegistrationState.centralProfile=profile;
@@ -2609,6 +2619,36 @@ async function _loadCentralVisitorProfile(qr){
     }finally{ _visitorCentralLookupPending=false; }
 }
 
+
+async function _loadCentralVisitorFaces(){
+    centralFaceDirectory = [];
+    if(!navigator.onLine || !window.QLogCentral || typeof window.QLogCentral.lookupVisitorFaces!=='function') return [];
+    _visitorCentralLookupPending=true;
+    try{
+        var faces=[];
+        for(var attempt=0; attempt<8 && !faces.length; attempt++){
+            try{ faces=await window.QLogCentral.lookupVisitorFaces(); }catch(e){ faces=[]; }
+            if(faces.length) break;
+            await new Promise(function(r){setTimeout(r,200);});
+        }
+        centralFaceDirectory=(Array.isArray(faces)?faces:[]).filter(function(v){
+            return v && v.name && Array.isArray(v.faceDescriptor) && v.faceDescriptor.length>=64;
+        }).map(function(v){
+            return {
+                id:v.id||'', name:String(v.name||''),
+                nameSource:v.nameSource||'MANUAL',
+                descriptor:Float32Array.from(v.faceDescriptor),
+                profileKey:v.profileKey||'', updatedAt:v.updatedAt||''
+            };
+        });
+        console.log('[visitor] Central face directory:', centralFaceDirectory.length);
+        return centralFaceDirectory;
+    }catch(e){
+        centralFaceDirectory=[];
+        console.warn('[visitor] central face directory unavailable',e);
+        return [];
+    }finally{ _visitorCentralLookupPending=false; }
+}
 
 async function _faceRecognitionTick(){
     if (!faceApiReady) return;
@@ -2678,29 +2718,32 @@ async function _faceRecognitionTick(){
         else if (d < second){ second = d; }
     }
 
-    // When the visitor QR already resolved to a Central profile, use that
-    // profile's descriptor as the authoritative candidate. This prevents
-    // another office's local face cache from winning the match and ensures
-    // the Central nameSource (ID_OCR vs MANUAL) travels with the visitor.
-    var centralProfile = visitorRegistrationState.centralProfile;
-    if (centralProfile && Array.isArray(centralProfile.faceDescriptor) && centralProfile.faceDescriptor.length){
-        var cd = _euclidean(det.descriptor, centralProfile.faceDescriptor);
-        if (cd <= FACE_MATCH_THRESHOLD){
-            var centralEntry = {name:centralProfile.name, descriptor:Float32Array.from(centralProfile.faceDescriptor), nameSource:centralProfile.nameSource||'ID_OCR', visitorId:centralProfile.id||visitorRegistrationState.qr||''};
-            best = {dist:cd, name:centralProfile.name, entry:centralEntry};
-            second = Infinity;
-            for (var ci=0;ci<faceDescriptorCache.length;ci++){
-                var ce=faceDescriptorCache[ci];
-                if(centralProfile.id && ce.visitorId===centralProfile.id) continue;
-                var cdist=_euclidean(det.descriptor,ce.descriptor);
-                if(cdist<second) second=cdist;
-            }
-        }
+    // Cross-office identity is FACE + registered NAME from the Centralized DB.
+    // QR is NOT used as the identity key and must never be required to select
+    // the Central candidate. Local-office faces cannot veto a valid Central match.
+    var centralAuthoritativeMatch = false;
+    var centralBest = {dist:Infinity, entry:null, name:null};
+    for (var c=0;c<centralFaceDirectory.length;c++){
+        var cd = _euclidean(det.descriptor, centralFaceDirectory[c].descriptor);
+        if (cd < centralBest.dist) centralBest = {dist:cd, entry:centralFaceDirectory[c], name:centralFaceDirectory[c].name};
+    }
+    var CENTRAL_FACE_THRESHOLD = Math.max(FACE_MATCH_THRESHOLD, 0.58);
+    if (centralBest.entry && centralBest.dist <= CENTRAL_FACE_THRESHOLD){
+        best = {dist:centralBest.dist, name:centralBest.name, entry:centralBest.entry};
+        second = Infinity;
+        centralAuthoritativeMatch = true;
+        visitorRegistrationState.centralProfile = {
+            id:centralBest.entry.id||'',
+            name:centralBest.entry.name,
+            nameSource:centralBest.entry.nameSource||'MANUAL',
+            faceDescriptor:Array.from(centralBest.entry.descriptor),
+            profileKey:centralBest.entry.profileKey||''
+        };
     }
 
     var confidence = Math.max(0, Math.min(1, 1 - (best.dist / 0.9)));
     var margin = (second === Infinity) ? 0.1 : (second - best.dist);
-    var matched = best.name && best.dist <= FACE_MATCH_THRESHOLD && margin >= 0.04;
+    var matched = best.name && best.dist <= (centralAuthoritativeMatch ? CENTRAL_FACE_THRESHOLD : FACE_MATCH_THRESHOLD) && (centralAuthoritativeMatch || margin >= 0.04);
 
     if (matched){
         _stableMatchCounter++;
@@ -2808,20 +2851,20 @@ function _requireIdRecheckForReturningVisitor(){
 /* Starts a full visitor session for a scanned unknown QR. */
 function startVisitorSession(code){
     resetVisitorRegistrationState();
-    visitorRegistrationState.qr=code;
-    var prior=logs.filter(function(l){return l.id===code && l.category==='VISITOR' && l.name;});
-    visitorRegistrationState.centralLookupPending=!!(window.QLogCentral && typeof window.QLogCentral.lookupVisitorByQR==='function' && navigator.onLine);
-    visitorRegistrationState.mode=prior.length?'RETURNING':'NEW';
-    setVisitorFlowStatus(prior.length?'Registered visitor QR detected. Checking Central and preparing AI face recognition…':'Checking Central visitor record. Please look at the camera…','');
+    visitorRegistrationState.qr=code||'';
+    var prior=code ? logs.filter(function(l){return l.id===code && l.category==='VISITOR' && l.name;}) : [];
+    visitorRegistrationState.centralLookupPending=!!(window.QLogCentral && typeof window.QLogCentral.lookupVisitorFaces==='function' && navigator.onLine);
+    visitorRegistrationState.mode='NEW'; // FACE + NAME decides returning identity, never QR.
+    setVisitorFlowStatus('Checking Central visitor face directory. Please look at the camera…','');
     showVisitorTab(); showTab('visitors',document.querySelector('#visitorTabBtn'));
-    _loadCentralVisitorProfile(code).finally(function(){
-        if(visitorRegistrationState.qr!==code || visitorRegistrationState.logged) return;
+    _loadCentralVisitorFaces().finally(function(){
+        if(visitorRegistrationState.logged) return;
         if(!visitorRegistrationState.faceRecognized){
-            setVisitorFlowStatus(visitorRegistrationState.centralProfile?'Central visitor profile found. Please look at the camera for AI face recognition.':(prior.length?'Registered visitor QR detected. Please look at the camera for AI face recognition.':'New visitor. Please look at the camera — identity verification will start automatically.'),'');
+            setVisitorFlowStatus(centralFaceDirectory.length ? 'Central visitor faces loaded. Please look at the camera for AI face recognition.' : 'Please look at the camera — identity verification will start automatically.','');
         }
     });
     startVisitorCamera();
-    _visitorIdentifyDeadline=Date.now()+(prior.length?15000:12000);
+    _visitorIdentifyDeadline=Date.now()+15000;
     setTimeout(function(){
         var st=visitorRegistrationState;
         if(st.qr!==code || st.logged) return;
@@ -2829,7 +2872,7 @@ function startVisitorSession(code){
             setVisitorFlowStatus('Visitor not recognized. Choose <b>PRESENT VALID ID</b> or <b>NO VALID ID AVAILABLE</b>.','warn');
             openIdentityVerificationScreen(code);
         }
-    }, prior.length ? 15000 : 12000);
+    }, 15000);
     toast('Visitor QR scanned — starting verification','yellow');
 }
 
@@ -3153,8 +3196,8 @@ if(borrowScannerInput) {
 
 /* =====================================================================
    VISITOR WORKFLOW ENGINE
-   QR -> (Valid ID camera + offline OCR for new visitors) -> face
-   detection/registration/recognition -> reason -> AUTOMATIC time-in log.
+   Face (FACE + NAME from Central) -> optional QR/session context ->
+   (Valid ID camera + offline OCR for new visitors) -> reason -> AUTOMATIC time-in log.
    Fully offline. No speech-to-text. No USB ID scanner. No final Save button.
    ===================================================================== */
 
@@ -3194,6 +3237,7 @@ var _visitorIdentifyDeadline = 0;
 var _unknownFaceStreak = 0;
 var _visitorCentralProfile = null;
 var _visitorCentralLookupPending = false;
+var centralFaceDirectory = []; // Centralized identity source: FACE + NAME, never QR
 
 function resetVisitorRegistrationState(){
     visitorRegistrationState = {
@@ -3211,6 +3255,7 @@ function resetVisitorRegistrationState(){
     _unknownFaceStreak = 0;
     _visitorCentralProfile = null;
     _visitorCentralLookupPending = false;
+    centralFaceDirectory = [];
 }
 
 function setVisitorFlowStatus(text, kind){
