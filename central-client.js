@@ -482,6 +482,7 @@
         await fullProfileReconcile();
       }
       closeAuth(); connectSocket();
+      try{ window.dispatchEvent(new Event('qlog:central-ready')); }catch(e){}
       if(!held) setStatus('Central '+scopeLabel()+' connected','ok');
     }catch(e){
       var er=document.getElementById('qlogCentralAuthError'); if(er)er.textContent='Connection failed: '+e.message;
@@ -523,6 +524,7 @@
         await reconcile();
         clearPending(scope);
         connectSocket();
+        try{ window.dispatchEvent(new Event('qlog:central-profile-switched')); }catch(e){}
         setStatus('Central '+scopeLabel()+' switched instantly','ok');
         return;
       }
@@ -683,6 +685,7 @@
       }else if(resetRequested || !cached){ await fullProfileReconcile(); saveProfileCache(scope); localStorage.removeItem(RESET_KEY); }
       else { await sync(true); await fullProfileReconcile(); }
       connectSocket();
+      try{ window.dispatchEvent(new Event('qlog:central-ready')); }catch(e){}
     }else{
       setStatus('Central profile authentication required','warn'); openAuth();
     }
@@ -700,11 +703,24 @@
   }
 
   async function lookupVisitorFaces(){
-    if(!state.token||!navigator.onLine)return [];
+    if(!navigator.onLine)return [];
+    // A second device may start the visitor camera before the fast Central
+    // authentication handshake has completed. Wait for the existing session
+    // instead of returning an empty face directory and falling back locally.
+    for(var i=0;i<40 && !state.token;i++) await new Promise(function(r){setTimeout(r,250);});
+    if(!state.token)return [];
     try{
       var resp=await api('/api/visitors/faces');
       return (resp&&Array.isArray(resp.visitors))?resp.visitors:[];
-    }catch(e){ return []; }
+    }catch(e){
+      if(e.status===401||e.status===403){
+        for(var j=0;j<8 && !state.token;j++) await new Promise(function(r){setTimeout(r,250);});
+        if(state.token){
+          try{var retry=await api('/api/visitors/faces'); return (retry&&Array.isArray(retry.visitors))?retry.visitors:[];}catch(_e){}
+        }
+      }
+      return [];
+    }
   }
 
   async function checkInventoryBatch(dataset,items){
