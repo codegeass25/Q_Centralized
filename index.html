@@ -2468,8 +2468,8 @@ var faceApiLoading = false;
 var faceDescriptorCache = []; // [{name, descriptor:Float32Array}]
 var _lastFaceMatchName = null;
 var _stableMatchCounter = 0;
-var FACE_MATCH_THRESHOLD = 0.58;   // euclidean distance (lower = more similar); tuned for returning-visitor variation
-var FACE_MATCH_STABLE_FRAMES = 2;  // confirm across two consecutive frames
+var FACE_MATCH_THRESHOLD = 0.62;   // euclidean distance (lower = more similar); tuned for returning-visitor variation
+var FACE_MATCH_STABLE_FRAMES = 3;  // confirm across two consecutive frames
 
 /* ---------- Offline Valid ID / OCR verification configuration ----------
    All thresholds are local; nothing here contacts the network. */
@@ -2629,7 +2629,7 @@ async function _loadCentralVisitorFaces(force){
         _visitorCentralLookupPending=true;
         try{
             var faces=[];
-            for(var attempt=0; attempt<20 && !faces.length; attempt++){
+            for(var attempt=0; attempt<40 && !faces.length; attempt++){
                 try{ faces=await window.QLogCentral.lookupVisitorFaces(); }catch(e){ faces=[]; }
                 if(faces.length) break;
                 await new Promise(function(r){setTimeout(r,300);});
@@ -2667,7 +2667,14 @@ async function _faceRecognitionTick(){
 
     var st = visitorRegistrationState;
     if (st.logged) return;
-    if (st.centralLookupPending){ _setFaceHud('detecting','Checking Central visitor profile…',20); return; }
+    if (st.centralLookupPending && !centralFaceDirectory.length){
+        if (window.QLogCentral && navigator.onLine && !_centralFaceDirectoryPromise) _loadCentralVisitorFaces(false).catch(function(){});
+        _setFaceHud('detecting','Checking Central visitor faces…',20);
+        return;
+    }
+    if (!centralFaceDirectory.length && window.QLogCentral && navigator.onLine && !_centralFaceDirectoryPromise){
+        _loadCentralVisitorFaces(false).catch(function(){});
+    }
 
     var dets;
     try{
@@ -2736,7 +2743,7 @@ async function _faceRecognitionTick(){
         var cd = _euclidean(det.descriptor, centralFaceDirectory[c].descriptor);
         if (cd < centralBest.dist) centralBest = {dist:cd, entry:centralFaceDirectory[c], name:centralFaceDirectory[c].name};
     }
-    var CENTRAL_FACE_THRESHOLD = 0.62;
+    var CENTRAL_FACE_THRESHOLD = 0.68;
     if (centralBest.entry && centralBest.dist <= CENTRAL_FACE_THRESHOLD){
         best = {dist:centralBest.dist, name:centralBest.name, entry:centralBest.entry};
         second = Infinity;
@@ -2884,6 +2891,15 @@ function startVisitorSession(code){
     }, 15000);
     toast('Visitor QR scanned — starting verification','yellow');
 }
+
+window.addEventListener('qlog:central-ready', function(){
+    _loadCentralVisitorFaces(true).catch(function(e){ console.warn('[visitor] Central face preload after auth failed', e); });
+});
+window.addEventListener('qlog:central-profile-switched', function(){
+    centralFaceDirectory=[];
+    _centralFaceDirectoryLastAttempt=0;
+    _loadCentralVisitorFaces(true).catch(function(e){ console.warn('[visitor] Central face preload after office switch failed', e); });
+});
 
 async function startVisitorCamera(){
     if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
@@ -7071,7 +7087,7 @@ window.addEventListener('load', function(){
 /* ===== Offline-first runtime: service worker, status indicator, diagnostics ===== */
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', function(){
-        navigator.serviceWorker.register('./service-worker.js', { scope: './' })
+        navigator.serviceWorker.register('./service-worker.js', { scope: './', updateViaCache: 'none' })
             .then(function(reg){ console.log('[QLog] Service Worker registered, scope:', reg.scope); })
             .catch(function(err){ console.warn('[QLog] Service Worker registration failed:', err); });
     });
