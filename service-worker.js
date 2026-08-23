@@ -10,7 +10,7 @@
      service-worker update.
    ===================================================================== */
 
-const CACHE_NAME = "qlogpro-offline-v22-face-central-recognition";
+const CACHE_NAME = "qlogpro-offline-v23-global-face-sync";
 
 const PRECACHE_URLS = [
   "./",
