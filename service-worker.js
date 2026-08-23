@@ -10,7 +10,7 @@
      service-worker update.
    ===================================================================== */
 
-const CACHE_NAME = "qlogpro-offline-v19-visitor-central-equipment-export-fix";
+const CACHE_NAME = "qlogpro-offline-v21-superfast-central-sync-profilehandoff";
 
 const PRECACHE_URLS = [
   "./",
