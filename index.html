@@ -2062,6 +2062,7 @@ function saveLibrarianConfigAndContinue() {
     
     currentSession = { facility: "School Library", inCharge: person, designation: desig, role: 'librarian' };
     localStorage.setItem('savedSession', JSON.stringify(currentSession));
+    if(window.QLogCentral && typeof window.QLogCentral.profileChanged==='function') window.QLogCentral.profileChanged();
     finalizeStartup(true);
 }
 
@@ -2081,6 +2082,7 @@ function saveConfigAndContinue() {
     
     currentSession = { facility: fac, inCharge: inc, designation: des, role: 'incharge' };
     localStorage.setItem('savedSession', JSON.stringify(currentSession));
+    if(window.QLogCentral && typeof window.QLogCentral.profileChanged==='function') window.QLogCentral.profileChanged();
     finalizeStartup(false);
 }
 
@@ -2672,9 +2674,30 @@ async function _faceRecognitionTick(){
     var second = Infinity;
     for (var i=0;i<faceDescriptorCache.length;i++){
         var d = _euclidean(det.descriptor, faceDescriptorCache[i].descriptor);
-        if (d < best.dist){ second = best.dist; best = {dist:d, name: faceDescriptorCache[i].name}; }
+        if (d < best.dist){ second = best.dist; best = {dist:d, name: faceDescriptorCache[i].name, entry: faceDescriptorCache[i]}; }
         else if (d < second){ second = d; }
     }
+
+    // When the visitor QR already resolved to a Central profile, use that
+    // profile's descriptor as the authoritative candidate. This prevents
+    // another office's local face cache from winning the match and ensures
+    // the Central nameSource (ID_OCR vs MANUAL) travels with the visitor.
+    var centralProfile = visitorRegistrationState.centralProfile;
+    if (centralProfile && Array.isArray(centralProfile.faceDescriptor) && centralProfile.faceDescriptor.length){
+        var cd = _euclidean(det.descriptor, centralProfile.faceDescriptor);
+        if (cd <= FACE_MATCH_THRESHOLD){
+            var centralEntry = {name:centralProfile.name, descriptor:Float32Array.from(centralProfile.faceDescriptor), nameSource:centralProfile.nameSource||'ID_OCR', visitorId:centralProfile.id||visitorRegistrationState.qr||''};
+            best = {dist:cd, name:centralProfile.name, entry:centralEntry};
+            second = Infinity;
+            for (var ci=0;ci<faceDescriptorCache.length;ci++){
+                var ce=faceDescriptorCache[ci];
+                if(centralProfile.id && ce.visitorId===centralProfile.id) continue;
+                var cdist=_euclidean(det.descriptor,ce.descriptor);
+                if(cdist<second) second=cdist;
+            }
+        }
+    }
+
     var confidence = Math.max(0, Math.min(1, 1 - (best.dist / 0.9)));
     var margin = (second === Infinity) ? 0.1 : (second - best.dist);
     var matched = best.name && best.dist <= FACE_MATCH_THRESHOLD && margin >= 0.04;
@@ -6604,9 +6627,10 @@ function applyEquipmentScan(item){
     if(!sameUnit(item.unit, currentSession.facility)){
         msg = '⛔ <b>' + eqEsc(item.name) + '</b> is assigned to <b>' + eqEsc(item.unit) + '</b> — not to your unit.';
         toast('⛔ Equipment belongs to ' + item.unit, 'red');
-    } else if(item.status !== 'AVAILABLE'){
-        msg = '⚠️ <b>' + eqEsc(item.name) + '</b> is currently <b>' + eqEsc(item.status) + '</b> and cannot be borrowed.';
-        toast('⚠️ Equipment is ' + item.status, 'yellow');
+    } else if(eqAvailableQty(item) <= 0 || item.status === 'DAMAGED' || item.status === 'MAINTENANCE'){
+        var unavailableState = (item.status === 'DAMAGED' || item.status === 'MAINTENANCE') ? item.status : '0 AVAILABLE';
+        msg = '⚠️ <b>' + eqEsc(item.name) + '</b> is currently <b>' + eqEsc(unavailableState) + '</b> and cannot be borrowed.';
+        toast('⚠️ Equipment is unavailable', 'yellow');
     } else {
         msg = '✅ <b>' + eqEsc(item.name) + '</b> — ' + eqEsc(item.category||'') + ' • ' + eqEsc(item.unit) + ' • Available: <b>' + eqAvailableQty(item) + '</b> / ' + eqQty(item) + ' • Condition: ' + eqEsc(item.condition||'Good');
         toast('🧰 Equipment verified: ' + item.name, 'green');
