@@ -872,6 +872,30 @@ async function emitUpdated(event) {
   io.emit('qlog:updated', event);
 }
 
+
+app.post('/api/auth/switch-profile', async (req,res,next) => {
+  try {
+    const token = parseBearer(req);
+    if (!token) return res.status(401).json({ok:false,error:'DEVICE_AUTH_REQUIRED'});
+    const device = await get(`SELECT * FROM devices WHERE token_hash=?`, [tokenHash(token)]);
+    if (!device) return res.status(401).json({ok:false,error:'INVALID_DEVICE_TOKEN'});
+    const {facility,inCharge,designation,role} = req.body || {};
+    const f=norm(facility), ic=norm(inCharge), dg=norm(designation), rl=norm(role);
+    if(!f||!ic) return res.status(400).json({ok:false,error:'PROFILE_REQUIRED'});
+    const pk=profileKey(f,ic), ts=nowIso();
+    const assignment=await get('SELECT * FROM profile_assignments WHERE profile_key=?',[pk]);
+    if(assignment && assignment.status !== 'ACTIVE') return res.status(403).json({ok:false,error:'PROFILE_ARCHIVED',profileKey:pk});
+    if(!assignment){
+      await run(`INSERT INTO profile_assignments(profile_key,assignment_id,in_charge,facility,designation,role,status,started_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,[pk,`ASSIGN-${pk}`,ic,f,dg,rl,'ACTIVE',ts,ts,ts]);
+    }else{
+      await run(`UPDATE profile_assignments SET designation=?,role=?,updated_at=? WHERE profile_key=?`,[dg,rl,ts,pk]);
+    }
+    const generation=await getCentralResetGeneration();
+    await run(`UPDATE devices SET facility=?,in_charge=?,designation=?,role=?,profile_key=?,last_seen_at=?,sync_ready=0,auth_generation=? WHERE source_id=?`,[f,ic,dg,rl,pk,ts,generation,device.source_id]);
+    res.json({ok:true,sourceId:device.source_id,token,profileKey:pk,facility:f,inCharge:ic,designation:dg,role:rl,centralResetGeneration:generation,syncReady:false});
+  }catch(e){next(e);}
+});
+
 app.post('/api/device/activate-sync', requireDevice, async(req,res,next)=>{
   try {
     const currentGeneration = await getCentralResetGeneration();
