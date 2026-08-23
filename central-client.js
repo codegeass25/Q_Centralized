@@ -18,6 +18,7 @@
   var CENTRAL_RESET_GENERATION_KEY = 'qlogCentralResetGeneration';
   var RESET_HOLD_KEY = 'qlogCentralResetHold::';
   var DELETE_QUEUE_PREFIX = 'qlogCentralDeleteQueue::';
+  var PENDING_PREFIX = 'qlogCentralPending::';
 
   var SYNC_KEYS = ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs','configData','dynamicFilterData','borrowPolicies'];
   var PROFILE_DATASETS = ['people','logs','books','borrowLogs','reservations','auditLogs','equipment','equipLogs'];
@@ -30,6 +31,7 @@
     sourceId: localStorage.getItem(SOURCE_KEY) || '',
     activeFacility: localStorage.getItem(ACTIVE_FACILITY_KEY) || '',
     activeProfileKey: localStorage.getItem(ACTIVE_PROFILE_KEY) || '',
+    activeScope: localStorage.getItem('qlogCentralActiveScope') || '',
     syncing: false,
     suppress: false,
     pending: new Set(),
@@ -65,6 +67,10 @@
   function scopeId(){ return hashScope(currentScope()); }
   function cacheKey(scope,dataset){ return CACHE_PREFIX + hashScope(scope) + '::' + dataset; }
   function reconcileKey(scope){ return RECONCILE_PREFIX + hashScope(scope); }
+  function pendingKey(scope){ return PENDING_PREFIX + hashScope(scope); }
+  function loadPending(scope){ try{var v=JSON.parse(localStorage.getItem(pendingKey(scope))||'[]');return new Set(Array.isArray(v)?v.filter(function(x){return SYNC_KEYS.indexOf(x)!==-1;}):[]);}catch(e){return new Set();} }
+  function savePending(scope,p){ try{localStorage.setItem(pendingKey(scope),JSON.stringify(Array.from(p||[])));}catch(e){} }
+  function clearPending(scope){ try{localStorage.removeItem(pendingKey(scope));}catch(e){} }
 
   function setStatus(text,kind){
     var el=document.getElementById('qlogCentralStatus');
@@ -302,7 +308,7 @@
     state.pending.clear();
     clearTimeout(state.timer);
     state.timer=null;
-    var prefixes=[CACHE_PREFIX,RECONCILE_PREFIX,DELETE_QUEUE_PREFIX,RESET_HOLD_KEY];
+    var prefixes=[CACHE_PREFIX,RECONCILE_PREFIX,DELETE_QUEUE_PREFIX,RESET_HOLD_KEY,PENDING_PREFIX];
     var exact=[RESET_KEY,TOKEN_KEY,ACTIVE_PROFILE_KEY,ACTIVE_FACILITY_KEY,ACCESS_HINT_KEY];
     var keys=[];
     for(var i=0;i<localStorage.length;i++){
@@ -321,6 +327,8 @@
     state.token='';
     state.activeProfileKey='';
     state.activeFacility='';
+    state.activeScope='';
+    localStorage.removeItem('qlogCentralActiveScope');
     state.pending.clear();
     window.people=[];window.logs=[];window.books=[];window.borrowLogs=[];window.reservations=[];window.auditLogs=[];window.equipment=[];window.equipLogs=[];
     refreshUi();
@@ -424,7 +432,7 @@
       if(!facility||!inCharge)throw new Error('PROFILE_REQUIRED');
       var d=await fetch(API_BASE+'/api/auth/device',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({accessCode:code,sourceId:state.sourceId,facility:facility,inCharge:inCharge,designation:currentDesignation(),role:currentRole()})});
       var j=await d.json().catch(function(){return{};}); if(!d.ok)throw new Error(j.error||('HTTP '+d.status));
-      state.token=j.token; state.activeFacility=facility; state.activeProfileKey=j.profileKey||scopeId();
+      state.token=j.token; state.activeFacility=facility; state.activeProfileKey=j.profileKey||scopeId(); state.activeScope=currentScope();
       var serverGeneration=Number(j.centralResetGeneration||0);
       var storedGenerationRaw=localStorage.getItem(CENTRAL_RESET_GENERATION_KEY);
       var storedGeneration=storedGenerationRaw===null?null:Number(storedGenerationRaw);
@@ -435,12 +443,17 @@
         state.token=j.token;
         state.activeFacility=facility;
         state.activeProfileKey=j.profileKey||scopeId();
+        state.activeScope=currentScope();
+        state.pending=loadPending(currentScope());
       }
 
       localStorage.setItem(CENTRAL_RESET_GENERATION_KEY,String(serverGeneration));
+      try{sessionStorage.setItem('qlogCentralOfficeCode',String(code||''));}catch(e){}
       localStorage.setItem(TOKEN_KEY,state.token);
       localStorage.setItem(ACTIVE_FACILITY_KEY,facility);
       localStorage.setItem(ACTIVE_PROFILE_KEY,state.activeProfileKey);
+      localStorage.setItem('qlogCentralActiveScope',currentScope());
+      state.pending=loadPending(currentScope());
       localStorage.setItem(ACCESS_HINT_KEY,new Date().toISOString());
 
       var resetRequested=!!localStorage.getItem(RESET_KEY);
@@ -480,22 +493,59 @@
     var scope=currentScope(); if(!scope||state.switchingProfile)return;
     state.switchingProfile=true;
     try{
-      var active=state.activeProfileKey;
-      if(active && active!==scopeId()){
-        if(state.activeFacility)saveProfileCache(active);
-        state.token=''; state.activeProfileKey='';
-        localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(ACTIVE_PROFILE_KEY);
-        state.activeFacility=currentFacility(); localStorage.setItem(ACTIVE_FACILITY_KEY,state.activeFacility);
-        if(hasProfileCache(scope))loadProfileCache(scope); else {PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});}
-        refreshUi(); openAuth(); setStatus('Profile changed — authenticate '+scopeLabel(),'warn');
+      var targetProfileId=scopeId();
+      var previousScope=state.activeScope||'';
+      if(state.activeProfileKey && state.activeProfileKey!==targetProfileId){
+        if(previousScope) saveProfileCache(previousScope);
+        savePending(previousScope,state.pending);
+        clearTimeout(state.timer); state.timer=null;
+
+        // Fast profile handoff: reuse the already-authenticated device token.
+        // No password/code dialog and no full re-authentication round trip.
+        if(!state.token||!navigator.onLine) throw new Error('PROFILE_AUTH_REQUIRED');
+        var switched=await api('/api/auth/switch-profile',{method:'POST',body:JSON.stringify({facility:currentFacility(),inCharge:currentInCharge(),designation:currentDesignation(),role:currentRole()})});
+        state.activeProfileKey=switched.profileKey||targetProfileId;
+        state.activeFacility=currentFacility();
+        state.activeScope=scope;
+        localStorage.setItem(TOKEN_KEY,state.token);
+        localStorage.setItem(ACTIVE_PROFILE_KEY,state.activeProfileKey);
+        localStorage.setItem(ACTIVE_FACILITY_KEY,state.activeFacility);
+        localStorage.setItem('qlogCentralActiveScope',scope);
+        state.pending=loadPending(scope);
+        if(state.socket){try{state.socket.disconnect();}catch(e){} state.socket=null;}
+
+        var cached=hasProfileCache(scope);
+        if(cached) loadProfileCache(scope); else PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});
+        refreshUi();
+        await activateSync('existing');
+        // Flush only this profile's queued local changes, then pull remote deltas.
+        if(state.pending.size) await sync(false);
+        await reconcile();
+        clearPending(scope);
+        connectSocket();
+        setStatus('Central '+scopeLabel()+' switched instantly','ok');
         return;
       }
-      state.activeFacility=currentFacility(); localStorage.setItem(ACTIVE_FACILITY_KEY,state.activeFacility);
+      state.activeFacility=currentFacility();
+      state.activeScope=scope;
+      localStorage.setItem(ACTIVE_FACILITY_KEY,state.activeFacility);
+      localStorage.setItem('qlogCentralActiveScope',scope);
+      state.pending=loadPending(scope);
       if(state.token){
-        if(hasProfileCache(scope)){loadProfileCache(scope);await sync(true);await fullProfileReconcile();}
+        if(hasProfileCache(scope)){loadProfileCache(scope);await reconcile();}
         else{await fullProfileReconcile();saveProfileCache(scope);}
+        connectSocket();
       }
+    }catch(e){
+      if(e.status===401||e.status===403){state.token='';state.activeProfileKey='';state.activeScope='';localStorage.removeItem(TOKEN_KEY);localStorage.removeItem(ACTIVE_PROFILE_KEY);localStorage.removeItem('qlogCentralActiveScope');openAuth();}
+      else setStatus('Central office switch waiting for connection','warn');
     }finally{state.switchingProfile=false;}
+  }
+  function profileChanged(){
+    var scope=currentScope();
+    if(!scope)return;
+    clearTimeout(state.timer); state.timer=null;
+    switchProfile();
   }
 
   async function sync(forceAll){
@@ -514,7 +564,9 @@
         }
       });
       var resp=await api('/api/sync',{method:'POST',body:JSON.stringify({version:'5.0.0',client:'QLog Pro Ultimate',datasets:snap,deletions:deleteQueue,device:{facility:currentFacility(),inCharge:currentInCharge(),designation:currentDesignation(),role:currentRole()}})});
-      state.pending.clear(); clearDeleteQueue(currentScope()); await reconcile();
+      state.pending.clear(); savePending(currentScope(),state.pending); clearDeleteQueue(currentScope());
+      // Socket.IO will invalidate remote peers; avoid an immediate second GET here.
+      // The fallback reconcile timer remains responsible when sockets are unavailable.
       setStatus('Central sync complete · '+scopeLabel()+' · deduped '+((resp.deduped||[]).length),'ok');
       return true;
     }catch(e){
@@ -527,12 +579,18 @@
   function schedule(names){
     names=(names||SYNC_KEYS).filter(function(n){return SYNC_KEYS.indexOf(n)!==-1;});
     names.forEach(function(n){state.pending.add(n);});
-    clearTimeout(state.timer); state.timer=setTimeout(function(){sync(false);},900);
+    savePending(currentScope(),state.pending);
+    clearTimeout(state.timer); state.timer=setTimeout(function(){sync(false);},140);
   }
   function patchStorage(){
     var ls=window.localStorage; if(!ls||ls.__qlogCentralPatched)return;
     var os=ls.setItem.bind(ls),or=ls.removeItem.bind(ls);
     ls.setItem=function(k,v){
+      if(k==='savedSession'){
+        os(k,v);
+        setTimeout(function(){profileChanged();},0);
+        return;
+      }
       var before=null;
       if(!state.suppress&&SYNC_KEYS.indexOf(k)!==-1){try{before=JSON.parse(ls.getItem(k)||'null');}catch(e){}}
       os(k,v);
@@ -599,7 +657,9 @@
     var facility=currentFacility(),inCharge=currentInCharge(),scope=currentScope();
     if(!facility||!inCharge){setStatus('Waiting for In-Charge profile…','warn');setTimeout(init,1200);return;}
     state.activeFacility=facility;
-    if(state.activeProfileKey && state.activeProfileKey!==scopeId()){
+    if(state.activeProfileKey && state.activeProfileKey!==scopeId() && state.token){
+      // Keep the authenticated device session; switchProfile() will perform a fast server-side profile handoff.
+    } else if(state.activeProfileKey && state.activeProfileKey!==scopeId()){
       state.token=''; state.activeProfileKey=''; localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(ACTIVE_PROFILE_KEY);
     }
     var resetRequested=!!localStorage.getItem(RESET_KEY);
@@ -610,7 +670,13 @@
     }else if(cached && !resetRequested) loadProfileCache(scope);
     else {PROFILE_DATASETS.forEach(function(n){setDatasetLocal(n,[],false);});}
     if(!navigator.onLine){setStatus(held?'Offline — device reset is held; use Rebuild when online':'Offline — '+scopeLabel()+' local data retained','warn');return;}
-    if(state.token && state.activeProfileKey===scopeId()){
+    if(state.token && state.activeProfileKey!==scopeId()){
+      await switchProfile();
+      connectSocket();
+    }else if(state.token && state.activeProfileKey===scopeId()){
+      state.activeScope=scope;
+      localStorage.setItem('qlogCentralActiveScope',scope);
+      state.pending=loadPending(scope);
       setStatus('Central '+scopeLabel()+' connection ready','warn');
       if(held){
         setStatus('Connected to Central. Local device is reset; click Rebuild My Office Data to restore.','warn');
@@ -620,8 +686,8 @@
     }else{
       setStatus('Central profile authentication required','warn'); openAuth();
     }
-    setInterval(function(){installSaveHooks();watchProfile();if(navigator.onLine){if(state.pending.size)sync(false);else reconcile();connectSocket();}},10000);
-    window.addEventListener('online',function(){watchProfile();setStatus('Online — syncing '+scopeLabel()+'…','warn');sync(true);fullProfileReconcile();connectSocket();});
+    setInterval(function(){installSaveHooks();watchProfile();if(navigator.onLine){if(state.pending.size)sync(false);else reconcile();connectSocket();}},4000);
+    window.addEventListener('online',function(){watchProfile();setStatus('Online — syncing '+scopeLabel()+'…','warn');sync(true);reconcile();connectSocket();});
   }
 
   async function lookupVisitorByQR(qr){
@@ -671,7 +737,8 @@
     getProfileKey:function(){return state.activeProfileKey;},
     getProfile:function(){return {facility:currentFacility(),inCharge:currentInCharge(),profileKey:state.activeProfileKey};},
     checkInventoryBatch:checkInventoryBatch,
-    lookupVisitorByQR:lookupVisitorByQR
+    lookupVisitorByQR:lookupVisitorByQR,
+    profileChanged:profileChanged
   };
 
   window.addEventListener('load',function(){setTimeout(init,1200);});
